@@ -1,0 +1,184 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram id="atoms-flow-1" name="Atoms Runtime 全流程">
+    <mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1000" background="#ffffff" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="Atoms Runtime · 从一句话到上线" style="text;html=1;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#241f33" vertex="1" parent="1">
+          <mxGeometry x="40" y="24" width="700" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="每个任务一个容器、一个目录；Agent 在容器里写完并自己验证，最后按类型选择不同的部署方式" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#7b7591" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="900" height="24" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g1" value="① 打开工作台" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#faf8ff;strokeColor=#ded7f0;verticalAlign=top;align=left;spacingLeft=14;spacingTop=10;fontSize=13;fontStyle=1;fontColor=#5b4b96" vertex="1" parent="1">
+          <mxGeometry x="40" y="100" width="280" height="470" as="geometry"/>
+        </mxCell>
+        <mxCell id="c1" value="浏览器&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;打开工作台 :13579&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="60" y="150" width="240" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c2" value="登录&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;账号 + 密码，Cookie 里带 uid&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="60" y="235" width="240" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="c3" value="新建任务&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;写一句话需求，或选一个模板&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3efff;strokeColor=#8b5cf6;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="60" y="330" width="240" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="n1" value="看到效果满意后&lt;br&gt;点右上角「部署」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;dashed=1;fontSize=11;fontColor=#7b7591" vertex="1" parent="1">
+          <mxGeometry x="60" y="430" width="240" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g2" value="② 控制面 :13579" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#faf8ff;strokeColor=#ded7f0;verticalAlign=top;align=left;spacingLeft=14;spacingTop=10;fontSize=13;fontStyle=1;fontColor=#5b4b96" vertex="1" parent="1">
+          <mxGeometry x="360" y="100" width="380" height="470" as="geometry"/>
+        </mxCell>
+        <mxCell id="c4" value="给任务建目录&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;/data/{uid}/{taskId}/code&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="380" y="150" width="340" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="c5" value="起一个 runtime 容器&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;非 root（uid 10001），只挂自己的 code 目录&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="380" y="240" width="340" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="c6" value="Agent 干活（最多 20 步）&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;写文件 → 装依赖 → 起服务 → 检查页面&lt;br&gt;出错就把错误发回给模型继续改&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="380" y="335" width="340" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="c7" value="运维兜底&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;最多 20 个任务；闲置 6 小时回收容器&lt;br&gt;删除任务时容器和发布链接一起下线&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="380" y="440" width="340" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g3" value="③ 容器里干活 + 实时预览" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#faf8ff;strokeColor=#ded7f0;verticalAlign=top;align=left;spacingLeft=14;spacingTop=10;fontSize=13;fontStyle=1;fontColor=#5b4b96" vertex="1" parent="1">
+          <mxGeometry x="780" y="100" width="380" height="470" as="geometry"/>
+        </mxCell>
+        <mxCell id="c8" value="沙箱容器 atoms-{id}&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;/workspace = 任务目录&lt;br&gt;里面跑 dev server（:5173）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eefaf3;strokeColor=#22a06b;fontSize=13;fontColor=#1f3b30" vertex="1" parent="1">
+          <mxGeometry x="800" y="150" width="340" height="95" as="geometry"/>
+        </mxCell>
+        <mxCell id="c9" value="Agent 自己验证&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;check_http：状态码 + 页面文字&lt;br&gt;browser_check：控制台报错 + 截图&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="800" y="270" width="340" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="c10" value="反代 :24680&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;/preview/{taskId}/ → 容器 :5173&lt;br&gt;支持 WebSocket，改代码就热更新&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="800" y="375" width="340" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="c10b" value="你在 iframe 里看到的就是&lt;br&gt;容器里真实运行的页面" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;dashed=1;fontSize=11;fontColor=#7b7591" vertex="1" parent="1">
+          <mxGeometry x="800" y="480" width="340" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g4" value="④ 部署" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#faf8ff;strokeColor=#ded7f0;verticalAlign=top;align=left;spacingLeft=14;spacingTop=10;fontSize=13;fontStyle=1;fontColor=#5b4b96" vertex="1" parent="1">
+          <mxGeometry x="1200" y="100" width="460" height="470" as="geometry"/>
+        </mxCell>
+        <mxCell id="c11" value="点部署 → 打一个源码快照&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;versions/vN.tar.gz（不含 node_modules）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;fontSize=13;fontColor=#2f2a45" vertex="1" parent="1">
+          <mxGeometry x="1220" y="150" width="420" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="d1" value="有 start 脚本&lt;br&gt;或服务端依赖？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff7ed;strokeColor=#f59e0b;fontSize=12;fontColor=#6b4a13" vertex="1" parent="1">
+          <mxGeometry x="1330" y="245" width="200" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="lab-yes" value="是" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#1c4f85;" vertex="1" parent="1">
+          <mxGeometry x="1606" y="452" width="24" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="c15" value="部署不改动正在跑的任务；再来一次就是 v2、v3……&lt;br&gt;回滚就是把发布指向旧版本，旧产物不会被覆盖" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;dashed=1;fontSize=11;fontColor=#7b7591;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="405" width="420" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c14" value="删除任务 = 回收 runtime 容器 + 部署容器，发布链接同时失效" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d9d4e7;dashed=1;fontSize=11;fontColor=#7b7591" vertex="1" parent="1">
+          <mxGeometry x="1220" y="495" width="420" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g5" value="⑤ 分支一：静态（HTML / 前端 SPA）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f6fdf9;strokeColor=#bfe8d4;verticalAlign=top;align=left;spacingLeft=14;spacingTop=10;fontSize=13;fontStyle=1;fontColor=#1f6b4c" vertex="1" parent="1">
+          <mxGeometry x="780" y="600" width="380" height="330" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1" value="静态 HTML / 前端 SPA&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;没有 start 脚本&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#bfe8d4;fontSize=12;fontColor=#1f3b30" vertex="1" parent="1">
+          <mxGeometry x="800" y="645" width="340" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="s2" value="构建 → 产物放 releases/vN&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;vite build；旧版本不覆盖&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#bfe8d4;fontSize=12;fontColor=#1f3b30" vertex="1" parent="1">
+          <mxGeometry x="800" y="715" width="340" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="s3" value="反代 :24680 /apps/{slug}/ 直接读文件&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;不新建容器，预览仍走 runtime 容器&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eefaf3;strokeColor=#22a06b;fontSize=12;fontColor=#1f3b30" vertex="1" parent="1">
+          <mxGeometry x="800" y="790" width="340" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="s4" value="适合：待办、记账、小工具、纯前端游戏" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#bfe8d4;dashed=1;fontSize=11;fontColor=#5d7f6d" vertex="1" parent="1">
+          <mxGeometry x="800" y="865" width="340" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g6" value="⑥ 分支二：动态（需要服务端）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7fbff;strokeColor=#c7e0fb;verticalAlign=top;align=left;spacingLeft=14;spacingTop=10;fontSize=13;fontStyle=1;fontColor=#1c4f85" vertex="1" parent="1">
+          <mxGeometry x="1200" y="600" width="460" height="330" as="geometry"/>
+        </mxCell>
+        <mxCell id="y1" value="Express / Next / WebSocket 等&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;有 start 脚本，需要常驻进程&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#c7e0fb;fontSize=12;fontColor=#1c3550" vertex="1" parent="1">
+          <mxGeometry x="1220" y="645" width="420" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="y2" value="构建（如需）→ 取一个端口&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;端口池 22000–23000，只绑 127.0.0.1&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#c7e0fb;fontSize=12;fontColor=#1c3550" vertex="1" parent="1">
+          <mxGeometry x="1220" y="715" width="420" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="y3" value="新起一个部署容器 deploy-{slug}&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;注入 PORT=5173，60 秒健康检查&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eaf6ff;strokeColor=#3b82f6;fontSize=12;fontColor=#1c3550" vertex="1" parent="1">
+          <mxGeometry x="1220" y="790" width="420" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="y4" value="反代子域名：{slug}.&lt;host&gt;.sslip.io:24680&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;适合：登录、实时协作、上传、接口、共享数据&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#c7e0fb;fontSize=12;fontColor=#1c3550" vertex="1" parent="1">
+          <mxGeometry x="1220" y="865" width="420" height="45" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g7" value="多用户：怎么隔离" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fffdf7;strokeColor=#f3e1c0;verticalAlign=top;align=left;spacingLeft=14;spacingTop=10;fontSize=13;fontStyle=1;fontColor=#8a5a12" vertex="1" parent="1">
+          <mxGeometry x="40" y="600" width="720" height="330" as="geometry"/>
+        </mxCell>
+        <mxCell id="i1" value="① 账号：USERS 里配置账号，密码加盐哈希保存；登录后 Cookie 里带 uid" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#f3e1c0;fontSize=12;fontColor=#4a3a22;align=left;spacingLeft=12" vertex="1" parent="1">
+          <mxGeometry x="60" y="645" width="680" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="i2" value="② 接口：任务列表、文件读写、对话、部署都按 uid 过滤，访问别人的任务返回 404" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#f3e1c0;fontSize=12;fontColor=#4a3a22;align=left;spacingLeft=12" vertex="1" parent="1">
+          <mxGeometry x="60" y="700" width="680" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="i3" value="③ 目录：/data/{uid}/{taskId}；容器只挂自己的 code 子目录，看不到别人的东西" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#f3e1c0;fontSize=12;fontColor=#4a3a22;align=left;spacingLeft=12" vertex="1" parent="1">
+          <mxGeometry x="60" y="755" width="680" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="i4" value="④ 端口：预览 20000–21000，部署 22000–23000，都只绑 127.0.0.1，公网只有 24680" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#f3e1c0;fontSize=12;fontColor=#4a3a22;align=left;spacingLeft=12" vertex="1" parent="1">
+          <mxGeometry x="60" y="810" width="680" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="i5" value="⑤ 资源：每个任务一个容器（非 root）；最多 20 个；闲置 6 小时自动回收" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#f3e1c0;fontSize=12;fontColor=#4a3a22;align=left;spacingLeft=12" vertex="1" parent="1">
+          <mxGeometry x="60" y="865" width="680" height="45" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#8f8aa8;strokeWidth=1.4" edge="1" parent="1" source="c1" target="c2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#8f8aa8;strokeWidth=1.4" edge="1" parent="1" source="c2" target="c3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" value="提交" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#8f8aa8;strokeWidth=1.4;fontSize=11;fontColor=#6b6480;labelBackgroundColor=#ffffff" edge="1" parent="1" source="c3" target="c4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="340" y="365"/><mxPoint x="340" y="182"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#8f8aa8;strokeWidth=1.4" edge="1" parent="1" source="c4" target="c5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#8f8aa8;strokeWidth=1.4" edge="1" parent="1" source="c5" target="c6">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" value="在容器里操作" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#8f8aa8;strokeWidth=1.4;fontSize=11;fontColor=#6b6480;labelBackgroundColor=#ffffff" edge="1" parent="1" source="c6" target="c8">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="760" y="375"/><mxPoint x="760" y="197"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#8f8aa8;strokeWidth=1.4" edge="1" parent="1" source="c8" target="c9">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#8f8aa8;strokeWidth=1.4" edge="1" parent="1" source="c9" target="c10">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#8f8aa8;strokeWidth=1.4" edge="1" parent="1" source="c11" target="d1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e12" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#22a06b;strokeWidth=1.4;fontSize=11;fontColor=#1f6b4c;labelBackgroundColor=#ffffff" edge="1" parent="1" source="d1" target="s1">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1180" y="300"/><mxPoint x="1180" y="590"/><mxPoint x="760" y="590"/><mxPoint x="760" y="672"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e13" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#3b82f6;strokeWidth=1.4;fontSize=11;fontColor=#1c4f85;labelBackgroundColor=#ffffff" edge="1" parent="1" source="d1" target="y1">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1660" y="355"/><mxPoint x="1660" y="590"/><mxPoint x="1430" y="590"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#22a06b;strokeWidth=1.2" edge="1" parent="1" source="s1" target="s2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#22a06b;strokeWidth=1.2" edge="1" parent="1" source="s2" target="s3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#3b82f6;strokeWidth=1.2" edge="1" parent="1" source="y1" target="y2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e17" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#3b82f6;strokeWidth=1.2" edge="1" parent="1" source="y2" target="y3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e18" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#3b82f6;strokeWidth=1.2" edge="1" parent="1" source="y3" target="y4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

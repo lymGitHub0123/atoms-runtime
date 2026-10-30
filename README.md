@@ -31,6 +31,9 @@ Atoms Runtime 把这件事做完整：
 
 ## 架构
 
+![全流程](docs/atoms-runtime-flow.png)
+
+
 ```
 浏览器（工作台，由控制面托管）
    │ SSE（Agent 步骤流）              │ iframe（实时预览）
