@@ -1,0 +1,22 @@
+[Unit]
+Description=Atoms demo control plane (13579)
+After=network.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/data/atoms-demo-v2/apps/control
+EnvironmentFile=/data/atoms-demo-v2/apps/control/.env
+Environment=PORT=13579
+Environment=ATOMS_ROOT=/data/atoms-demo-v2
+Environment=SANDBOX_IMAGE=atoms-sandbox:1
+Environment=PUBLIC_PROXY_BASE=http://<your-host>:24680
+Environment=PUBLIC_APP_HOST_SUFFIX=<your-host>.sslip.io
+Environment=PUBLIC_APP_PORT=24680
+Environment=DEPLOY_PORT_MIN=22000
+Environment=DEPLOY_PORT_MAX=23000
+ExecStart=/data/atoms-demo-v2/tools/node/bin/node /data/atoms-demo-v2/apps/control/server.mjs
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

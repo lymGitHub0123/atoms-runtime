@@ -1,0 +1,18 @@
+[Unit]
+Description=Atoms demo preview reverse proxy (24680)
+After=network.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/data/atoms-demo-v2
+ExecStart=/data/atoms-demo-v2/tools/node/bin/node /data/atoms-demo-v2/runtime/proxy.mjs
+Restart=always
+RestartSec=2
+Environment=PROXY_PORT=24680
+Environment=PREVIEW_MAP=/data/atoms-demo-v2/runtime/preview.json
+Environment=PUBLISH_FILE=/data/atoms-demo-v2/runtime/published.json
+Environment=PUBLIC_APP_HOST_SUFFIX=<your-host>.sslip.io
+Environment=PUBLIC_APP_PORT=24680
+
+[Install]
+WantedBy=multi-user.target

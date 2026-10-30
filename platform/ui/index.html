@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Atoms Runtime · 智能体应用生成器</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">✦</span>
+      <span class="brand-text"><b>Atoms Runtime</b><small>AGENT APP STUDIO</small></span>
+    </div>
+    <div class="top-actions">
+      <span class="chip" id="docker-chip">DOCKER · …</span>
+      <span class="chip" id="user-chip">…</span>
+      <span class="chip" id="model-chip">…</span>
+      <button class="btn ghost" id="logout">退出</button>
+      <button class="btn ghost" id="new-task">新建任务</button>
+      <button class="btn primary" id="deploy-btn" disabled>部署</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <aside class="col tasks-col">
+      <div class="col-head">
+        <span class="label">TASKS</span>
+        <div class="head-actions">
+          <span class="muted" id="task-count">0</span>
+          <button class="btn ghost small" id="new-task-inline">+ 新建</button>
+        </div>
+      </div>
+      <div id="task-list" class="task-list"></div>
+      <div class="task-info" id="task-info"></div>
+    </aside>
+
+    <section class="col steps-col">
+      <div class="col-head">
+        <span class="label">AGENT FLOW</span>
+        <span class="muted" id="step-state">待机</span>
+      </div>
+      <div id="steps" class="steps"></div>
+      <div class="deploy-log" id="deploy-log" hidden>
+        <div class="col-head"><span class="label">DEPLOY</span></div>
+        <pre id="deploy-log-body"></pre>
+      </div>
+    </section>
+
+    <section class="col chat-col">
+      <div class="col-head"><span class="label">CHAT</span><span class="muted" id="chat-hint">描述你要的应用</span></div>
+      <div id="chat" class="chat"></div>
+      <form id="composer" class="composer">
+        <textarea id="message" rows="2" placeholder="例如：做一个番茄钟，支持开始/暂停/重置"></textarea>
+        <div class="composer-row">
+          <span class="muted small">Enter 发送 · Shift+Enter 换行</span>
+          <button class="btn primary" id="send" type="submit">发送</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="col preview-col">
+      <div class="preview-head">
+        <div class="tabs">
+          <button class="tab active" data-tab="preview">预览</button>
+          <button class="tab" data-tab="files">文件</button>
+        </div>
+        <div class="preview-actions">
+          <span class="muted small" id="preview-url"></span>
+          <button class="btn ghost small" id="refresh">刷新</button>
+          <a class="btn ghost small" id="open" target="_blank" rel="noreferrer">新窗口</a>
+        </div>
+      </div>
+      <div class="preview-body">
+        <iframe id="frame" title="预览" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"></iframe>
+        <div class="files-view" id="files-view" hidden>
+          <div class="file-list" id="file-list"></div>
+          <pre class="file-body" id="file-body">选择左侧文件查看内容</pre>
+        </div>
+      </div>
+      <div class="publish-bar" id="publish-bar" hidden>
+        <span class="muted small">已发布：</span>
+        <a id="publish-link" target="_blank" rel="noreferrer"></a>
+        <button class="btn ghost small" id="publish-copy">复制</button>
+      </div>
+    </section>
+  </main>
+
+  <div class="empty" id="empty">
+    <h1>描述一个想法，Agent 在沙箱里把它做出来</h1>
+    <p>每次任务都会启动一个独立容器，挂载独立目录；Agent 会写代码、启动服务、自己验证，最后可以一键部署。</p>
+    <form id="new-form" class="new-form">
+      <input id="new-name" placeholder="任务名称（可选）" />
+      <textarea id="new-prompt" rows="3" placeholder="例如：做一个番茄钟，支持开始/暂停/重置，界面精致"></textarea>
+      <button class="btn primary" type="submit">创建任务</button>
+    </form>
+  </div>
+
+  <div class="login" id="login" hidden>
+    <form id="login-form" class="login-card">
+      <h2>登录 Atoms Runtime</h2>
+      <p class="muted">每个账号拥有独立的任务目录与容器</p>
+      <input id="username" placeholder="用户名" autocomplete="username" value="admin" />
+      <input id="password" type="password" placeholder="密码" autocomplete="current-password" />
+      <button class="btn primary" type="submit">进入</button>
+      <p class="error" id="login-error"></p>
+    </form>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
