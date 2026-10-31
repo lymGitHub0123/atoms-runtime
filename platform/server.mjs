@@ -504,6 +504,9 @@ const SYSTEM_PROMPT = `你是 Atoms Runtime 里的工程 Agent，在隔离 Linux
    · 纯 HTML：cmd = node /opt/static-server.mjs /workspace 5173 /preview/{taskId}/
    · React/Vite：先 run "npm install --no-audit --no-fund"，再 dev_server cmd = npx vite --host 0.0.0.0 --port 5173 --base=/preview/{taskId}/
    · 服务端应用：npm install，dev_server cmd = PORT=5173 node server.js（或你的 start 命令）
+     只跑一个进程：页面和 API 都由 server.js 提供，固定监听 5173；不要同时开 Vite dev server 或第二个服务端口。BASE_PATH=/preview/{taskId} 会自动注入，server.js 要把它挂到静态和 API 路由上。
+     路由写法直接用注入值：const BASE = process.env.BASE_PATH || ''; app.use(BASE + '/api', api); app.use(BASE, express.static(publicDir)); 部署时 BASE 为空，自动走根路径。
+     不要用 run 起 5309 之类的临时端口去模拟 /preview/x；预览路由由平台处理，直接用 browser_check 访问 /preview/{taskId}/ 验收。
 3. 验收（这一步不能省）：
    · 每个交互控件都要用 browser_check 的 actions 真实操作一次，并用 expect 断言结果；只截图不算验收。
    · 例：按 ↑ 后断言方块位置或分数变化；点「添加」后断言列表里出现新内容；刷新后断言数据还在。
@@ -522,6 +525,8 @@ const SYSTEM_PROMPT = `你是 Atoms Runtime 里的工程 Agent，在隔离 Linux
 · 纯 HTML 用相对路径引用资源（./style.css），不要用 /style.css。
 · Vite 项目 package.json 必须同时有 dev 和 build 脚本。
 · 服务端应用必须监听 process.env.PORT（预览时是 5173），静态目录用绝对路径（path.join(__dirname, ...)）。
+· 预览端口 5173 只能有一个进程；启动/重启一律用 dev_server（它会清理旧进程），不要用 run background 起服务。
+· browser_check 必须带 actions 或 expect，不能空调用；只截图不算验收。
 · 沙箱里没有 curl / git / wget / ps / pkill。
 · 文件 path 用相对路径（如 index.html、src/App.jsx），不要写 /workspace/ 前缀。
 · 中文界面，视觉精致；业务数据不要存 localStorage（主题偏好可以）。`;
@@ -598,17 +603,64 @@ async function runTool(task, name, args, gate) {
     case "dev_server": {
       const action = String(args.action || "restart");
       const pidfile = "/tmp/atoms-preview.pid";
-      const base = ["exec", "-u", "agent", "-w", "/workspace", task.container];
-      if (action !== "start") {
-        await docker([...base, "sh", "-lc", `if [ -f ${pidfile} ]; then kill $(cat ${pidfile}) 2>/dev/null; rm -f ${pidfile}; fi; sleep 1`], { timeout: 20000 });
-        if (action === "stop") return { ok: true, output: "预览已停止" };
-      }
+      const killScript = [
+        'const fs=require("fs");',
+        'for(const d of fs.readdirSync("/proc")){',
+        'if(!/^[0-9]+$/.test(d)||Number(d)===process.pid)continue;',
+        'let c="";try{c=fs.readFileSync("/proc/"+d+"/cmdline","utf8").replace(/\\0/g," ")}catch{continue}',
+        'if(c.includes("node")||c.includes("vite")){try{process.kill(Number(d),"SIGKILL")}catch{}}',
+        "}",
+      ].join("");
+      await docker(["exec", "-u", "agent", task.container, "node", "-e", killScript], { timeout: 20000 }).catch(() => null);
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      if (action === "stop") return { ok: true, output: "预览已停止" };
+
       const cmd = String(args.cmd || "").trim();
       if (!cmd) return { ok: false, error: "start/restart 需要 cmd" };
-      const res = await docker(["exec", "-d", "-u", "agent", "-w", "/workspace", task.container, "sh", "-lc", `echo $$ > ${pidfile}; exec ${cmd}`], { timeout: 20000 });
-      return { ok: res.code === 0, output: res.code === 0 ? "预览已启动" : res.err || res.out || "启动失败" };
+      if (/listen\s*\(/.test(cmd)) {
+        return { ok: false, error: "dev_server 只接受常驻启动命令，不要用 node -e 之类一次性脚本起服务。" };
+      }
+      const res = await docker(
+        [
+          "exec",
+          "-d",
+          "-u",
+          "agent",
+          "-w",
+          "/workspace",
+          "-e",
+          `BASE_PATH=/preview/${task.id}`,
+          "-e",
+          `PREVIEW_BASE=/preview/${task.id}`,
+          task.container,
+          "sh",
+          "-lc",
+          `echo $$ > ${pidfile}; exec ${cmd}`,
+        ],
+        { timeout: 20000 },
+      );
+      if (res.code !== 0) return { ok: false, output: res.err || res.out || "启动失败" };
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      let alive = false;
+      for (let i = 0; i < 12; i += 1) {
+        try {
+          await fetch(`http://127.0.0.1:${task.port}/preview/${task.id}/`, { signal: AbortSignal.timeout(1500) });
+          alive = true;
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      }
+      if (!alive) {
+        return { ok: false, error: "预览进程启动后无法访问：命令可能执行完就退出，或者没有监听 5173。请用常驻命令（例如 PORT=5173 node server.js）。" };
+      }
+      return { ok: true, output: "预览已启动并可访问（已清理旧进程）" };
     }
     case "run": {
+      const command = String(args.cmd || "");
+      if (/listen\s*\(/.test(command) || /\b(npm run dev|npm start|node\s+server\.js|npx vite|vite --host)\b/.test(command)) {
+        return { ok: false, error: "不要在 run 里起服务或监听端口。启动/重启预览用 dev_server，验收用 browser_check；临时端口测试会被拒。" };
+      }
       const base = ["exec", "-u", "agent", "-w", "/workspace", task.container];
       if (args.background) {
         const res = await docker(["exec", "-d", "-u", "agent", "-w", "/workspace", task.container, "sh", "-lc", args.cmd], { timeout: 20000 });
@@ -634,6 +686,10 @@ async function runTool(task, name, args, gate) {
       };
       const ids = Array.isArray(args.checkIds) ? args.checkIds.map(String) : [];
       const key = JSON.stringify(spec);
+
+      if (!spec.actions.length && !spec.expect.length) {
+        return { ok: false, error: "browser_check 需要 actions 或 expect；只截图不算验收，不要空调用。" };
+      }
 
       if (gate) {
         const blocked = ids.filter((id) => gate.unstable.has(id));
