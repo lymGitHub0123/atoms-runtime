@@ -41,6 +41,15 @@ function el(tag, className, text) {
 
 /* ---------- tasks ---------- */
 
+function taskBadge(task) {
+  if (task.run === "running") return { text: "生成中", cls: "run" };
+  if (task.deploy && task.deploy.ok === false) return { text: "发布失败", cls: "fail" };
+  if (task.verify && task.verify.ok === false) return { text: "验收未过", cls: "fail" };
+  if (task.published) return { text: `已发布 v${task.published.version}`, cls: "ok" };
+  if (task.verify?.ok) return { text: "已验收", cls: "ok" };
+  return { text: "未验收", cls: "idle" };
+}
+
 async function loadTasks() {
   state.tasks = await api("/api/tasks");
   $("task-count").textContent = String(state.tasks.length);
@@ -50,7 +59,11 @@ async function loadTasks() {
     const item = el("div", "task-item" + (state.current?.id === task.id ? " active" : ""));
     const main = el("div", "task-main");
     main.appendChild(el("b", null, task.name));
-    main.appendChild(el("span", null, new Date(task.createdAt).toLocaleString("zh-CN")));
+    const badge = taskBadge(task);
+    const meta = el("span", "task-meta");
+    meta.appendChild(el("i", `task-badge ${badge.cls}`, badge.text));
+    meta.appendChild(el("span", null, new Date(task.createdAt).toLocaleString("zh-CN")));
+    main.appendChild(meta);
     item.appendChild(main);
 
     const del = el("button", "task-del", "×");
@@ -115,11 +128,10 @@ function renderTaskInfo() {
   $("task-info").innerHTML = "";
   const rows = [
     ["任务", task.name],
-    ["ID", task.id],
-    ["容器", task.container],
-    ["端口", `127.0.0.1:${task.port}`],
-    ["状态", task.status],
+    ["状态", task.status === "running" ? "运行中" : "已回收（可重新打开）"],
     ["技术", task.stack || "-"],
+    ["验收", task.verify ? (task.verify.ok ? "通过" : `未通过：${String(task.verify.reason || "").slice(0, 40)}`) : "还没跑"],
+    ["发布", task.deploy ? (task.deploy.ok ? `v${task.deploy.version}` : `失败：${String(task.deploy.message || "").slice(0, 40)}`) : task.published ? `v${task.published.version}` : "未发布"],
   ];
   for (const [key, value] of rows) {
     const row = el("div");
@@ -176,12 +188,41 @@ function renderEvents() {
 function renderPublish() {
   const published = state.current?.published;
   $("publish-bar").hidden = !published;
-  if (!published) { $("publish-link").textContent = ""; $("publish-link").removeAttribute("href"); }
-  if (published) {
-    const link = $("publish-link");
-    const href = String(published.url || "").startsWith("http") ? published.url : `${state.proxyBase}${published.url}`;
-    link.href = href;
-    link.textContent = `${href} · v${published.version}${published.port ? ` · 容器 :${published.port}` : ""}`;
+  if (!published) {
+    $("publish-link").textContent = "";
+    $("publish-link").removeAttribute("href");
+    $("version-select").hidden = true;
+    $("rollback-btn").hidden = true;
+    return;
+  }
+  const link = $("publish-link");
+  const href = String(published.url || "").startsWith("http") ? published.url : `${state.proxyBase}${published.url}`;
+  link.href = href;
+  link.textContent = `v${published.version} · ${href}`;
+  loadVersions();
+}
+
+async function loadVersions() {
+  const task = state.current;
+  const select = $("version-select");
+  const button = $("rollback-btn");
+  if (!task?.published) {
+    select.hidden = true;
+    button.hidden = true;
+    return;
+  }
+  try {
+    const data = await api(`/api/tasks/${task.id}/versions`);
+    const versions = data.versions || [];
+    select.innerHTML = versions
+      .map((item) => `<option value="${item.version}" ${item.current ? "selected" : ""}>v${item.version}${item.current ? "（当前）" : ""}</option>`)
+      .join("");
+    const many = versions.length > 1;
+    select.hidden = !many;
+    button.hidden = !many;
+  } catch {
+    select.hidden = true;
+    button.hidden = true;
   }
 }
 
@@ -465,6 +506,26 @@ $("message").addEventListener("keydown", (event) => {
 });
 
 $("deploy-btn").onclick = deploy;
+$("rollback-btn").onclick = async () => {
+  const version = Number($("version-select").value);
+  if (!state.current?.published || !version) return;
+  if (!window.confirm(`回滚到 v${version}？当前版本会保留，随时可以切回来。`)) return;
+  const button = $("rollback-btn");
+  button.disabled = true;
+  button.textContent = "回滚中…";
+  try {
+    const data = await api(`/api/tasks/${state.current.id}/rollback`, { method: "POST", body: JSON.stringify({ version }) });
+    state.current.published.version = data.version;
+    renderPublish();
+    const href = String(data.url || "").startsWith("http") ? data.url : `${state.proxyBase}${data.url}`;
+    toast(`已回滚到 v${data.version}`, href);
+  } catch (error) {
+    toast(String(error.message || error).replace(/^HTTP \d+: /, ""));
+  } finally {
+    button.disabled = false;
+    button.textContent = "回滚";
+  }
+};
 $("publish-copy").onclick = async () => {
   const published = state.current?.published;
   if (!published) return;

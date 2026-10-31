@@ -14,8 +14,8 @@ Atoms Runtime 把这件事做完整：
 一句话需求
   → 起一个隔离容器，挂载该任务专属目录
   → Agent 在容器里写代码、装依赖、起 dev server
-  → Agent 自己用 HTTP + 无头浏览器验证（状态码、可见文本、控制台报错、截图）
-  → 失败把错误回灌给模型继续改（最多 20 步）
+  → Agent 先列验收项，再自己点按/按键操作页面并断言结果（HTTP、无头浏览器、截图）
+  → 没通过验收就回灌给模型继续改，最多 40 步；验收不过不让收尾
   → 点部署：快照 + 构建 + 发布
 ```
 
@@ -40,7 +40,7 @@ Atoms Runtime 把这件事做完整：
    ▼                                  ▼
 控制面 :13579                       反代 :24680
  ├─ 任务 API（创建/查询/删除）          ├─ /preview/{taskId}/  → 沙箱 dev server（HTTP + WS）
- ├─ Agent 工具循环（最多 20 步）        ├─ /apps/{slug}/       → 静态产物（releases/vN）
+ ├─ Agent 工具循环（最多 40 步）        ├─ /apps/{slug}/       → 静态产物（releases/vN）
  ├─ 部署（快照 / 构建 / 发布）          └─ {slug}.<host>.sslip.io → 部署容器 127.0.0.1:22xxx
  ├─ 账号 / 配额 / 闲置回收
  └─ 登录（HMAC Cookie）
@@ -60,18 +60,19 @@ atoms-sandbox:1（node22 + pnpm，非 root uid 10001）
 ├── data/{uid}/{taskId}/
 │   ├── code/                # 唯一可变工作区（runtime 挂载）
 │   ├── versions/vN.tar.gz   # 部署时源码快照
-│   ├── releases/vN/         # 不可变静态产物
+│   ├── releases/vN/         # 不可变产物（静态文件或服务端运行目录）
 │   └── shots/               # browser_check 截图
 └── logs/
 ```
 
 ## Agent 工具
 
-`list_files / write_file / read_file / run / check_http / browser_check / finish`
+`list_files / write_file / read_file / run / dev_server / plan_checks / check_http / browser_check / finish`
 
+- 先 `plan_checks` 把需求拆成验收项，再用 `browser_check` 的 actions/expect 真实操作并断言；`finish` 门禁会拒绝无验收的收尾
 - 迭代是**秒级热更**（容器内 dev server），构建只在部署时发生
-- 沙箱无 curl/git，验证统一走内置工具
-- 前端项目必须带 `--base=/preview/{taskId}/`，由提示词强制
+- 沙箱无 curl/git/ps/pkill，预览启停统一用 `dev_server`
+- 预览用 `--base=/preview/{taskId}/`；业务代码里的接口路径跟应用根走（`import.meta.env.BASE_URL` 或相对路径），不能写死预览前缀
 
 ## 两种部署模式
 
@@ -82,13 +83,16 @@ atoms-sandbox:1（node22 + pnpm，非 root uid 10001）
 
 容器应用用子域名根路径，避免 `/apps/x/` 前缀破坏 `/_next`、`/api` 等绝对资源。
 
+两种模式都从源码快照解压到 `releases/vN` 再构建，运行中的服务只读这份产物；工作区继续改不影响已发布版本。发布后会重放这一轮验收过的接口和页面操作，失败就不上线；历史版本可以一键回滚，回滚失败自动退回原版本。
+
 ## 关键设计
 
 1. **每任务一个容器 + 独立目录**：`/data/{uid}/{taskId}`，容器只挂 `code/`；Agent 看不到别人的快照和产物。
 2. **账号即隔离**：`USERS` 配置账号，Cookie 带 uid，所有任务接口按 uid 过滤，跨账号 404。
-3. **Agent 自验证**：`check_http` 看状态与文本，`browser_check` 用无头 Chrome 看控制台报错并截图；失败回灌重试。
-4. **不可变产物 + 指针发布**：`releases/vN` 不覆盖，发布记录切换指针；删除任务会删两个容器（沙箱 + 部署）并下线链接。
-5. **运维兜底**：`MAX_TASKS` 配额、6 小时闲置回收（容器销毁、工作区保留）、部署端口池 22000–23000、预览端口池 20000–21000。
+3. **Agent 自验证**：先列验收项，再用无头浏览器真实点按/按键并断言（文本、元素数量、输入值、控制台错误）；不通过就不允许收尾。
+4. **发布后自检 + 重放验收**：资源逐个请求（404 / HTML 回退页判失败），再把这一轮验收过的接口和页面操作在新地址重跑一遍。
+5. **不可变产物 + 指针发布**：`releases/vN` 不覆盖，服务端应用也从这里运行；版本列表可一键回滚，回滚先起服务再验收，失败自动退回。
+6. **运维兜底**：`MAX_TASKS` 配额、6 小时闲置回收（容器销毁、工作区保留）、部署端口池 22000–23000、预览端口池 20000–21000；沙箱 1G/1 CPU/512 进程，部署容器 512M/0.75 CPU；同一个任务的聊天/部署/回滚/删除互斥。
 
 ## API
 
@@ -101,6 +105,28 @@ atoms-sandbox:1（node22 + pnpm，非 root uid 10001）
 | GET/POST | `/api/tasks/:id/exec` | 在沙箱执行命令 |
 | POST | `/api/tasks/:id/chat` | 触发 Agent（SSE：step / message / done / error） |
 | POST | `/api/tasks/:id/deploy` | 快照 + 构建 + 发布（SSE 日志） |
+| GET | `/api/tasks/:id/versions` | 可回滚的历史版本 |
+| POST | `/api/tasks/:id/rollback` | 切到历史版本（先起服务再验收） |
+
+## 自检
+
+不需要模型，跑一遍鉴权、越权、路径越界、静态发布、服务端发布、两次发布、回滚和清理：
+
+```bash
+node ops/selfcheck.mjs http://127.0.0.1:13579 admin <password>
+```
+
+只用仓库文件起一套临时环境再跑同样的自检（验证新环境可重建）：
+
+```bash
+node ops/cleanroom.mjs .
+```
+
+模型回归评测：10 条固定需求逐条生成，记录是否通过验收、耗时、检查项数量；`--deploy` 会连发布和回放一起跑：
+
+```bash
+node ops/regress.mjs http://127.0.0.1:13579 admin <password> --deploy
+```
 
 ## 快速开始
 

@@ -22,6 +22,17 @@ const DEPLOY_PORT_MIN = Number(process.env.DEPLOY_PORT_MIN || 22000);
 const DEPLOY_PORT_MAX = Number(process.env.DEPLOY_PORT_MAX || 23000);
 const APP_HOST_SUFFIX = (process.env.PUBLIC_APP_HOST_SUFFIX || "").replace(/^\.+/, "");
 const PUBLIC_APP_PORT = process.env.PUBLIC_APP_PORT || "24680";
+const PROXY_PORT = Number(
+  process.env.PROXY_PORT ||
+    (() => {
+      try {
+        return new URL(process.env.PUBLIC_PROXY_BASE || "").port;
+      } catch {
+        return 0;
+      }
+    })() ||
+    24680,
+);
 const STATE_FILE = path.join(ROOT, "runtime/tasks.json");
 const PREVIEW_MAP = path.join(ROOT, "runtime/preview.json");
 const PUBLISH_FILE = path.join(ROOT, "runtime/published.json");
@@ -42,6 +53,23 @@ const LLM = {
 
 const MAX_TASKS = Number(process.env.MAX_TASKS || 20);
 const TTL_HOURS = Number(process.env.TASK_TTL_HOURS || 6);
+const SANDBOX_MEMORY = process.env.SANDBOX_MEMORY || "1g";
+const SANDBOX_CPUS = process.env.SANDBOX_CPUS || "1";
+const SANDBOX_PIDS = process.env.SANDBOX_PIDS || "512";
+const DEPLOY_MEMORY = process.env.DEPLOY_MEMORY || "512m";
+const DEPLOY_CPUS = process.env.DEPLOY_CPUS || "0.75";
+const NODE_BIN = process.env.TOOLS_NODE || "/data/atoms-demo-v2/tools/node/bin/node";
+const BROWSER_BIN = process.env.BROWSER_CHECK || "/data/atoms-demo-v2/tools/pw/browser-check.mjs";
+
+const taskLocks = new Set();
+function lockTask(id) {
+  if (taskLocks.has(id)) return false;
+  taskLocks.add(id);
+  return true;
+}
+function unlockTask(id) {
+  taskLocks.delete(id);
+}
 
 const ADMIN_PASSWORD = (process.env.ADMIN_PASSWORD || "").trim();
 const SECRET = process.env.AUTH_SECRET || ADMIN_PASSWORD || "atoms-demo";
@@ -113,8 +141,16 @@ const taskRoot = (task) => path.join(ROOT, "data", task.uid || "admin", task.id)
 const taskCode = (task) => path.join(taskRoot(task), "code");
 
 function ensureInside(root, target) {
-  const full = path.resolve(root, target || ".");
-  if (!full.startsWith(path.resolve(root))) throw new Error("路径越界");
+  const base = fs.realpathSync(root);
+  const full = path.resolve(base, target || ".");
+  const rel = path.relative(base, full);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error("路径越界");
+  if (fs.existsSync(full)) {
+    const real = fs.realpathSync(full);
+    const realRel = path.relative(base, real);
+    if (realRel.startsWith("..") || path.isAbsolute(realRel)) throw new Error("路径越界");
+    return real;
+  }
   return full;
 }
 
@@ -265,79 +301,254 @@ const TOOLS = [
     type: "function",
     function: {
       name: "run",
-      description: "在沙箱执行命令；background=true 后台运行（启动 dev server 用）",
-      parameters: { type: "object", properties: { cmd: { type: "string" }, background: { type: "boolean" }, timeout: { type: "number" } }, required: ["cmd"] },
+      description: "在沙箱执行命令；background=true 后台运行（启动 dev server 用）。需要脚本验证的验收项可带 checkId（可选 expect 匹配输出）",
+      parameters: {
+        type: "object",
+        properties: {
+          cmd: { type: "string" },
+          background: { type: "boolean" },
+          timeout: { type: "number" },
+          checkId: { type: "string" },
+          expect: { type: "string" },
+        },
+        required: ["cmd"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "plan_checks",
+      description: "写代码前先把需求拆成用户视角的验收项，每个交互至少一条。finish 前所有验收项必须通过。",
+      parameters: {
+        type: "object",
+        properties: {
+          checks: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { id: { type: "string" }, desc: { type: "string" } },
+              required: ["id", "desc"],
+            },
+          },
+        },
+        required: ["checks"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "dev_server",
+      description: "启动/重启/停止预览服务。修改代码后重启用它，不要用 ps/pkill（沙箱里没有）。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["start", "restart", "stop"] },
+          cmd: { type: "string", description: "启动命令，start/restart 时必填" },
+        },
+        required: ["action"],
+      },
     },
   },
   {
     type: "function",
     function: {
       name: "check_http",
-      description: "从宿主机访问应用，返回状态与页面片段",
-      parameters: { type: "object", properties: { path: { type: "string" }, expect: { type: "string" } } },
+      description: "从宿主机请求应用接口，返回状态码与响应片段。服务端接口验收用这个，带 checkId 表示该验收项通过。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+          body: { type: "string" },
+          headers: { type: "object" },
+          expect: { type: "string" },
+          expectStatus: { type: "number" },
+          checkId: { type: "string" },
+        },
+      },
     },
   },
   {
     type: "function",
     function: {
       name: "browser_check",
-      description: "用无头浏览器打开预览页，返回标题、可见文本、控制台报错并自动截图",
-      parameters: { type: "object", properties: {} },
+      description: "无头浏览器打开预览页。actions 按顺序按键/点击/输入，expect 断言结果；页面操作过才可能通过 finish。带 checkIds 表示这些验收项通过。",
+      parameters: {
+        type: "object",
+        properties: {
+          actions: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: ["press", "click", "fill", "wait", "reload"] },
+                key: { type: "string" },
+                selector: { type: "string" },
+                value: { type: "string" },
+                ms: { type: "number" },
+              },
+              required: ["type"],
+            },
+          },
+          expect: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                type: {
+                  type: "string",
+                  enum: [
+                    "textContains",
+                    "textNotContains",
+                    "selectorExists",
+                    "selectorCount",
+                    "inputValue",
+                    "urlContains",
+                    "consoleErrors",
+                    "requestFailures",
+                    "noPageOverflow",
+                  ],
+                },
+                selector: { type: "string" },
+                value: { type: "string" },
+                min: { type: "number" },
+                max: { type: "number" },
+                equals: { type: "number" },
+              },
+              required: ["type"],
+            },
+          },
+          viewport: {
+            type: "object",
+            properties: { width: { type: "number" }, height: { type: "number" } },
+            description: "可选视口，例如 400x860 测窄屏",
+          },
+          checkIds: { type: "array", items: { type: "string" } },
+        },
+      },
     },
   },
-  { type: "function", function: { name: "finish", description: "任务完成", parameters: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] } } },
+  { type: "function", function: { name: "finish", description: "任务完成；验收未通过会被拒绝", parameters: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] } } },
 ];
 
 const SYSTEM_PROMPT = `你是 Atoms Runtime 里的工程 Agent，在隔离 Linux 沙箱中工作，工作目录 /workspace，容器用户 agent。
 
-工具：list_files / write_file / read_file / run / check_http / browser_check / finish。
+工具：list_files / write_file / read_file / run / dev_server / check_http / browser_check / plan_checks / finish。
 
-规则：
-1. 先看现状再动手，小步修改。
-2. 纯 HTML：写完后 run 后台启动：node /opt/static-server.mjs /workspace 5173 /preview/{taskId}/（background=true，末尾参数必须换成你的任务 ID）。
-3. React/Vite：写 package.json、vite.config.js、index.html、src/main.jsx、src/App.jsx；先 run "npm install --no-audit --no-fund"，再后台 run "npx vite --host 0.0.0.0 --port 5173"。
-4. 每次改完必须 check_http 验证；check_http 通过后再跑一次 browser_check，确认控制台无报错、页面有可见内容；有报错就继续修。
-5. 最多 10 步；通过后调用 finish，说明功能与访问方式。
-6. 中文界面，视觉精致；浏览器端不要用 localStorage。
-6.1 如果需求必须服务端能力（登录会话、实时通信、文件上传、共享数据、密钥代理、定时任务），做一个真正的服务端应用：
-   · Express 方案：npm install express，写 server.js，public/ 放静态资源，start 脚本 "node server.js"，必须监听 process.env.PORT || 3000；
-   · Next.js 方案：npm install next react react-dom，使用 app/ 路由，start 脚本 "next start"。
-   · 服务端应用同样要保证依赖装好、start 能直接跑起来，然后 check_http 验证。
-   · 预览时用 run 后台启动：PORT=5173 <你的启动命令>（例如 PORT=5173 node server.js，或 PORT=5173 npx next dev -p 5173），再 check_http。
-7. 沙箱里没有 curl / git / wget，不要用它们；验证一律用 check_http；需要看进程用 run "ps aux | head"。
-8. 用 Vite：package.json 必须同时包含 dev 和 build 脚本；启动 dev server 的命令固定为
-   npx vite --host 0.0.0.0 --port 5173 --base=/preview/{taskId}/
-   （{taskId} 换成用户消息里给你的任务 ID；不带 base 会导致资源 404）。
-9. 纯 HTML 应用用相对路径引用资源（./style.css），不要用 /style.css。
-10. 文件 path 用相对路径（如 index.html、src/App.jsx），不要写 /workspace/ 前缀。`;
+工作顺序：
+1. 先 plan_checks：把需求拆成用户视角、可执行的验收项，每个交互至少一条。
+   例：需求「做一个 2048」→ 按 ↑ 方块向上移动 / 按 → 方块向右移动 / 两个相同数字合并后分数增加 / 新游戏清零。
+   每项起一个短 id，后面 check_http、browser_check 带上这个 id。
+2. 再写代码，小步修改。写完用 dev_server 启动或重启预览（不要用 ps/pkill）：
+   · 纯 HTML：cmd = node /opt/static-server.mjs /workspace 5173 /preview/{taskId}/
+   · React/Vite：先 run "npm install --no-audit --no-fund"，再 dev_server cmd = npx vite --host 0.0.0.0 --port 5173 --base=/preview/{taskId}/
+   · 服务端应用：npm install，dev_server cmd = PORT=5173 node server.js（或你的 start 命令）
+3. 验收（这一步不能省）：
+   · 每个交互控件都要用 browser_check 的 actions 真实操作一次，并用 expect 断言结果；只截图不算验收。
+   · 例：按 ↑ 后断言方块位置或分数变化；点「添加」后断言列表里出现新内容；刷新后断言数据还在。
+   · 服务端接口用 check_http（method/body/expectStatus/expect），并带 checkId。
+   · 没法用浏览器或接口证明的（依赖数量、构建产物、文件内容），用 run 跑脚本并带 checkId；列验收项时就要想好怎么验证。
+   · 修完必须重新验收；最后一次改代码之后的结果才算数。
+4. 所有验收项通过后才调用 finish，summary 写清功能和访问方式。没过的 finish 会被拒绝，你会拿到原因。
+
+约束：
+· 最多 40 步，别把步数耗在重启服务上，用 dev_server。
+· 验收要稳定：随机应用（2048 新方块、贪吃蛇食物）不要断言精确棋盘，断言不变量（如按 ↑ 后每列方块连续贴顶、分数增加、无控制台错误）。
+· 达成 2048、游戏结束这类难以在界面上稳定触发的检查，用 run 跑逻辑脚本并带 checkId，不要靠 UI 碰运气。
+· 同一断言连续失败两次，就换验证方式（reload、换选择器、改断言）；验收项本身不可验证或太不稳定时，重新 plan_checks 换掉，不要原样重试。
+· 同一条命令或同一个检查不要连续重跑；连续两次没有新信息就换方法：读代码、改映射、重新 plan_checks。方向类逻辑用四组固定棋盘做单元测试，失败就直接改映射。
+· 前端请求同源接口时，路径跟着应用根走：Vite 用 import.meta.env.BASE_URL + 'api/xxx'，纯 HTML 用相对路径 './api/xxx'。绝对不要写死 /preview/{taskId}/，部署时应用挂在根路径，写死会导致发布后全部请求 404。
+· 纯 HTML 用相对路径引用资源（./style.css），不要用 /style.css。
+· Vite 项目 package.json 必须同时有 dev 和 build 脚本。
+· 服务端应用必须监听 process.env.PORT（预览时是 5173），静态目录用绝对路径（path.join(__dirname, ...)）。
+· 沙箱里没有 curl / git / wget / ps / pkill。
+· 文件 path 用相对路径（如 index.html、src/App.jsx），不要写 /workspace/ 前缀。
+· 中文界面，视觉精致；业务数据不要存 localStorage（主题偏好可以）。`;
 
 async function callModel(messages) {
-  const res = await fetch(`${LLM.base}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${LLM.key}` },
-    body: JSON.stringify({
-      model: LLM.model,
-      messages,
-      tools: TOOLS,
-      tool_choice: "auto",
-      temperature: 0.4,
-      ...LLM.extra,
-    }),
+  const body = JSON.stringify({
+    model: LLM.model,
+    messages,
+    tools: TOOLS,
+    tool_choice: "auto",
+    temperature: 0.4,
+    ...LLM.extra,
   });
-  if (!res.ok) throw new Error(`模型调用失败 ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  return res.json();
+  let lastError = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const res = await fetch(`${LLM.base}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${LLM.key}` },
+        body,
+        signal: AbortSignal.timeout(120000),
+      });
+      if (!res.ok) throw new Error(`模型调用失败 ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      return await res.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+  }
+  throw lastError;
 }
 
-async function runTool(task, name, args) {
+async function runTool(task, name, args, gate) {
   switch (name) {
     case "list_files":
       return { ok: true, output: listFiles(task).join("\n") || "(空目录)" };
     case "write_file": {
       const rel = writeFile(task, args.path, args.content ?? "");
+      if (gate) {
+        gate.dirty = true;
+        gate.callCounts.clear();
+        gate.checkFails.clear();
+        gate.unstable.clear();
+        gate.blockedSpecs.clear();
+      }
       return { ok: true, output: `已写入 ${rel}` };
     }
     case "read_file":
       return { ok: true, output: readFile(task, args.path).slice(0, 12000) };
+    case "plan_checks": {
+      const checks = Array.isArray(args.checks) ? args.checks.slice(0, 12) : [];
+      if (!checks.length) return { ok: false, error: "至少给一条验收项" };
+      const next = new Map();
+      const list = [];
+      for (const item of checks) {
+        const id = String(item.id || "").trim().slice(0, 40);
+        const desc = String(item.desc || "").trim().slice(0, 160);
+        if (!id || !desc) continue;
+        next.set(id, desc);
+        list.push(`${id}: ${desc}`);
+      }
+      if (gate) {
+        gate.checks = next;
+        for (const id of [...gate.verified]) if (!next.has(id)) gate.verified.delete(id);
+        gate.checkFails.clear();
+        gate.unstable.clear();
+        gate.blockedSpecs.clear();
+        gate.callCounts.clear();
+        gate.nudged = false;
+        gate.needNudge = false;
+      }
+      return { ok: list.length > 0, output: `验收项 ${list.length} 条：\n${list.join("\n")}` };
+    }
+    case "dev_server": {
+      const action = String(args.action || "restart");
+      const pidfile = "/tmp/atoms-preview.pid";
+      const base = ["exec", "-u", "agent", "-w", "/workspace", task.container];
+      if (action !== "start") {
+        await docker([...base, "sh", "-lc", `if [ -f ${pidfile} ]; then kill $(cat ${pidfile}) 2>/dev/null; rm -f ${pidfile}; fi; sleep 1`], { timeout: 20000 });
+        if (action === "stop") return { ok: true, output: "预览已停止" };
+      }
+      const cmd = String(args.cmd || "").trim();
+      if (!cmd) return { ok: false, error: "start/restart 需要 cmd" };
+      const res = await docker(["exec", "-d", "-u", "agent", "-w", "/workspace", task.container, "sh", "-lc", `echo $$ > ${pidfile}; exec ${cmd}`], { timeout: 20000 });
+      return { ok: res.code === 0, output: res.code === 0 ? "预览已启动" : res.err || res.out || "启动失败" };
+    }
     case "run": {
       const base = ["exec", "-u", "agent", "-w", "/workspace", task.container];
       if (args.background) {
@@ -346,45 +557,153 @@ async function runTool(task, name, args) {
       }
       const timeout = Math.min(Math.max(Number(args.timeout) || 60, 5), 180) * 1000;
       const res = await docker([...base, "sh", "-lc", args.cmd], { timeout });
-      return { ok: res.code === 0, exit: res.code, output: `${res.out}${res.err ? `\n[stderr]\n${res.err}` : ""}`.slice(-8000) };
+      const output = `${res.out}${res.err ? `\n[stderr]\n${res.err}` : ""}`.slice(-8000);
+      if (gate && res.code === 0 && args.checkId && gate.checks.has(String(args.checkId))) {
+        if (!args.expect || output.includes(String(args.expect))) gate.verified.add(String(args.checkId));
+      }
+      return { ok: res.code === 0, exit: res.code, output };
     }
     case "browser_check": {
       const url = `http://127.0.0.1:${task.port}/preview/${task.id}/`;
       const shotDir = path.join(taskRoot(task), "shots");
       fs.mkdirSync(shotDir, { recursive: true });
       const shot = path.join(shotDir, `check-${Date.now()}.png`);
+      const spec = {
+        actions: Array.isArray(args.actions) ? args.actions : [],
+        expect: Array.isArray(args.expect) ? args.expect : [],
+        ...(args.viewport ? { viewport: args.viewport } : {}),
+      };
+      const ids = Array.isArray(args.checkIds) ? args.checkIds.map(String) : [];
+      const key = JSON.stringify(spec);
+
+      if (gate) {
+        const blocked = ids.filter((id) => gate.unstable.has(id));
+        if (blocked.length) {
+          gate.needNudge = true;
+          return {
+            ok: false,
+            error: `验收项 ${blocked.join("、")} 已连续失败 3 次。先重新 plan_checks，换成能稳定验证的断言（随机结果用不变量），再继续。`,
+          };
+        }
+        if (gate.blockedSpecs.has(key)) {
+          gate.needNudge = true;
+          return { ok: false, error: "同一套检查已连续失败 3 次。换一种验证方式，或改代码后再试。" };
+        }
+      }
+
+      const specPath = path.join(ROOT, "runtime", `spec-${task.id}-${Date.now()}.json`);
+      fs.writeFileSync(specPath, JSON.stringify(spec));
       const raw = await new Promise((resolve) => {
         execFile(
-          "/data/atoms-demo-v2/tools/node/bin/node",
-          ["/data/atoms-demo-v2/tools/pw/browser-check.mjs", url, shot],
-          { timeout: 90000, cwd: "/data/atoms-demo-v2/tools/pw", maxBuffer: 2 * 1024 * 1024 },
+          NODE_BIN,
+          [BROWSER_BIN, url, shot, "2500", specPath],
+          { timeout: 120000, cwd: path.dirname(BROWSER_BIN), maxBuffer: 2 * 1024 * 1024 },
           (_error, stdout) => resolve(String(stdout || "")),
         );
       });
+      fs.rmSync(specPath, { force: true });
       try {
         const data = JSON.parse(raw);
+        const actionsRun = (data.actions || []).length;
+        if (gate) {
+          gate.browserOk = Boolean(data.ok);
+          gate.browserAt = Date.now();
+          gate.buttons = Math.max(gate.buttons, Number(data.buttons) || 0);
+          gate.inputs = Math.max(gate.inputs, Number(data.inputs) || 0);
+          gate.actionsRun += actionsRun;
+          gate.expectsRun += spec.expect.length;
+          if (data.ok && spec.actions.length && spec.expect.length) gate.browserSpec = spec;
+          if (data.ok) gate.dirty = false;
+          for (const id of Array.isArray(args.checkIds) ? args.checkIds : []) {
+            if (data.ok && gate.checks.has(String(id))) gate.verified.add(String(id));
+          }
+        }
+        const failures = data.failures || [];
+        let hint = "";
+        if (gate) {
+          if (data.ok) {
+            gate.failCounts.delete(key);
+            for (const id of ids) {
+              gate.checkFails.delete(id);
+              gate.unstable.delete(id);
+            }
+          } else {
+            gate.browserFailTotal += 1;
+            const count = (gate.failCounts.get(key) || 0) + 1;
+            gate.failCounts.set(key, count);
+            if (count >= 3) gate.blockedSpecs.add(key);
+            const unstableNow = [];
+            for (const id of ids) {
+              const times = (gate.checkFails.get(id) || 0) + 1;
+              gate.checkFails.set(id, times);
+              if (times >= 3) {
+                gate.unstable.add(id);
+                unstableNow.push(id);
+              }
+            }
+            if (unstableNow.length) {
+              gate.needNudge = true;
+              hint = `验收项 ${unstableNow.join("、")} 连续失败 3 次。先重新 plan_checks，换成能稳定验证的断言；不要继续原样重试。`;
+            } else if (count >= 2) {
+              hint = "同一个断言已经失败两次。换一种验证方式（reload 后重测、改选择器、改断言），不要原样重试。";
+            }
+          }
+        }
+        const summary = `标题=${data.title || "-"}；文本=${String(data.text || "").slice(0, 60)}；动作=${actionsRun}；断言失败=${failures.length}；控制台错误=${(data.errors || []).length}`;
         return {
           ok: Boolean(data.ok),
           status: data.status,
           title: data.title,
           buttons: data.buttons,
+          inputs: data.inputs,
+          failures,
+          hint,
           errors: data.errors || [],
+          requestFailures: data.requestFailures || [],
           screenshot: data.screenshot,
-          output: `标题=${data.title || "-"}；可见文本=${String(data.text || "").slice(0, 80)}；控制台错误=${(data.errors || []).length}`,
+          output: [failures.length ? `${summary}\n${failures.join("\n")}` : summary, hint].filter(Boolean).join("\n"),
         };
       } catch {
+        if (gate) gate.browserOk = false;
         return { ok: false, error: "浏览器检查失败", output: raw.slice(0, 300) };
       }
     }
     case "check_http": {
       const target = `http://127.0.0.1:${task.port}${args.path || "/"}`;
       const started = Date.now();
+      const init = { method: args.method || "GET", headers: args.headers || {}, signal: AbortSignal.timeout(8000) };
+      if (args.body != null && init.method !== "GET") init.body = String(args.body);
       try {
-        const res = await fetch(target, { signal: AbortSignal.timeout(8000) });
+        const res = await fetch(target, init);
         const text = await res.text();
         const expectMatched = args.expect ? text.includes(args.expect) : true;
-        return { ok: res.ok && expectMatched, status: res.status, ms: Date.now() - started, expectMatched, snippet: text.slice(0, 600) };
+        const statusMatched = args.expectStatus ? res.status === Number(args.expectStatus) : true;
+        const ok = res.ok && expectMatched && statusMatched;
+        if (gate) {
+          gate.httpOk = ok;
+          if (ok && args.checkId && gate.checks.has(String(args.checkId))) gate.verified.add(String(args.checkId));
+          if (ok && args.path) {
+            const rec = {
+              method: init.method,
+              path: args.path,
+              body: init.body ?? null,
+              expect: args.expect || null,
+              expectStatus: args.expectStatus || null,
+            };
+            const key = JSON.stringify(rec);
+            if (!gate.httpChecks.some((item) => JSON.stringify(item) === key)) gate.httpChecks.push(rec);
+          }
+        }
+        return {
+          ok,
+          status: res.status,
+          ms: Date.now() - started,
+          expectMatched,
+          statusMatched,
+          snippet: text.slice(0, 600),
+        };
       } catch (error) {
+        if (gate) gate.httpOk = false;
         return { ok: false, error: String(error.message || error) };
       }
     }
@@ -393,8 +712,50 @@ async function runTool(task, name, args) {
   }
 }
 
+function gateProblems(gate) {
+  const problems = [];
+  if (gate.checks.size === 0) problems.push("还没用 plan_checks 列出验收项");
+  const missing = [...gate.checks.keys()].filter((id) => !gate.verified.has(id));
+  if (missing.length) problems.push(`这些验收项还没通过：${missing.join("、")}`);
+  if (gate.dirty) problems.push("最后一次改代码之后没有重新验收");
+  if (!gate.browserOk) problems.push("browser_check 还没通过（或最后一次失败）");
+  if (gate.buttons > 0 && gate.actionsRun === 0) problems.push("页面有按钮，但一次交互检查都没做");
+  if (gate.buttons > 0 && gate.expectsRun === 0) problems.push("做了操作但没有写断言（expect）");
+  return problems;
+}
+
+function gateSnapshot(gate) {
+  return {
+    plan: [...gate.checks.entries()].map(([id, desc]) => ({ id, desc })),
+    http: gate.httpChecks,
+    browser: gate.browserSpec,
+    at: new Date().toISOString(),
+  };
+}
+
 async function runAgent(task, prompt, send) {
   const events = [];
+  const gate = {
+    checks: new Map(),
+    verified: new Set(),
+    dirty: false,
+    browserOk: false,
+    httpOk: null,
+    buttons: 0,
+    inputs: 0,
+    actionsRun: 0,
+    expectsRun: 0,
+    httpChecks: [],
+    browserSpec: null,
+    failCounts: new Map(),
+    checkFails: new Map(),
+    unstable: new Set(),
+    blockedSpecs: new Set(),
+    callCounts: new Map(),
+    browserFailTotal: 0,
+    nudged: false,
+    needNudge: false,
+  };
   const record = (event) => {
     if (event.type === "step" && event.result) {
       const text =
@@ -404,7 +765,11 @@ async function runAgent(task, prompt, send) {
         (event.result.status ? `HTTP ${event.result.status}` : "") ||
         event.args?.summary ||
         (event.tool === "finish" ? "完成" : JSON.stringify(event.result).slice(0, 200));
-      events.push({ tool: event.tool, ok: Boolean(event.result.ok), text: String(text).slice(0, 240) });
+      const meta =
+        event.tool === "browser_check" || event.tool === "check_http" || event.tool === "plan_checks"
+          ? JSON.stringify(event.args || {}).slice(0, 400)
+          : "";
+      events.push({ tool: event.tool, ok: Boolean(event.result.ok), text: String(text).slice(0, 240), meta });
     }
   };
   const emit = (event) => {
@@ -418,14 +783,23 @@ async function runAgent(task, prompt, send) {
     { role: "user", content: `需求：${prompt}\n\n（任务 ID: ${task.id}；预览 base 路径：/preview/${task.id}/，Vite dev server 必须带 --base=/preview/${task.id}/）` },
   ];
 
-  for (let step = 1; step <= 20; step += 1) {
+  for (let step = 1; step <= 40; step += 1) {
+    if (step === 33) {
+      messages.push({ role: "user", content: "只剩 7 步。优先保证核心功能可验证、所有验收项通过后 finish；不要新增功能，也不要原样重复失败的断言。" });
+    }
     const payload = await callModel(messages);
     const message = payload.choices?.[0]?.message ?? {};
     const calls = message.tool_calls ?? [];
     if (message.content) emit({ type: "message", step, text: message.content });
     if (calls.length === 0) {
+      const problems = gateProblems(gate);
+      if (problems.length) {
+        messages.push({ role: "assistant", content: message.content || "" });
+        messages.push({ role: "user", content: `验收还没过：${problems.join("；")}。请继续修复并用 plan_checks 里的 checkId 完成验收，再 finish。` });
+        continue;
+      }
       emit({ type: "done", step, summary: message.content || "完成" });
-      return { summary: message.content || "完成", events };
+      return { summary: message.content || "完成", events, checks: gateSnapshot(gate), verified: true };
     }
     messages.push({ role: "assistant", content: message.content || null, tool_calls: calls });
 
@@ -438,18 +812,43 @@ async function runAgent(task, prompt, send) {
         args = {};
       }
       if (name === "finish") {
+        const problems = gateProblems(gate);
+        if (problems.length) {
+          const rejected = { ok: false, error: `验收未通过：${problems.join("；")}。修好后再 finish。` };
+          emit({ type: "step", step, tool: "finish", args, result: rejected });
+          messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(rejected) });
+          continue;
+        }
         emit({ type: "step", step, tool: "finish", args, result: { ok: true } });
         emit({ type: "done", step, summary: args.summary || "完成" });
-        return { summary: args.summary || "完成", events };
+        return { summary: args.summary || "完成", events, checks: gateSnapshot(gate), verified: true };
       }
       emit({ type: "step", step, tool: name, args });
-      const result = await runTool(task, name, args);
+      const callKey = `${name}|${JSON.stringify(args).slice(0, 400)}`;
+      const repeats = (gate.callCounts.get(callKey) || 0) + 1;
+      gate.callCounts.set(callKey, repeats);
+      let result;
+      if (repeats > 3) {
+        result = { ok: false, error: "同一个工具调用已经重复 3 次，先停下来想清楚，换一种做法或直接改代码，不要原样重试。" };
+      } else {
+        result = await runTool(task, name, args, gate);
+      }
       emit({ type: "step", step, tool: name, args, result });
       messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ tool: name, ...result }).slice(0, 12000) });
     }
+    if ((gate.needNudge || gate.browserFailTotal >= 5) && !gate.nudged) {
+      gate.nudged = true;
+      const unstable = [...gate.unstable];
+      messages.push({
+        role: "user",
+        content: unstable.length
+          ? `验收项 ${unstable.join("、")} 连续失败 3 次。不要继续重试：先 plan_checks 把这些项换成能稳定验证的断言（随机游戏用不变量，不要断言具体分数或位置），再继续。`
+          : "页面检查已经失败多次。停止原样重试：每次 browser_check 都会重新加载页面，随机应用不要断言精确分数或方块位置；把依赖多步的操作合并到一次 browser_check，用不变量断言；验收项本身不稳定就重新 plan_checks 换掉。",
+      });
+    }
   }
-  send({ type: "done", step: 20, summary: "达到最大步数" });
-  return { summary: "达到最大步数", events };
+  send({ type: "done", step: 40, summary: "未通过验收（达到步数上限）" });
+  return { summary: "未通过验收（达到步数上限）", events, verified: false };
 }
 
 /* ---------------- deploy ---------------- */
@@ -513,6 +912,136 @@ function runStream(cmd, args, onLine) {
   });
 }
 
+async function fetchPage(url) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    return { ok: res.ok, status: res.status, type: res.headers.get("content-type") || "", html: await res.text() };
+  } catch (error) {
+    return { ok: false, status: 0, type: "", html: "", error: String(error.message || error) };
+  }
+}
+
+async function findBrokenAssets(baseUrl) {
+  const page = await fetchPage(baseUrl);
+  if (!page.ok) return [`首页 ${baseUrl} 返回 ${page.status || page.error}`];
+  const refs = [...page.html.matchAll(/(?:src|href)="([^"]+)"/g)]
+    .map((m) => m[1])
+    .filter((ref) => ref && !ref.startsWith("//") && !/^(https?:|data:|mailto:|javascript:|#)/i.test(ref) && !ref.startsWith("/api/"));
+  const broken = [];
+  for (const ref of [...new Set(refs)].slice(0, 25)) {
+    const target = new URL(ref, baseUrl).toString();
+    const pathname = new URL(target).pathname;
+    const looksLikeAsset = /\.(js|mjs|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|json)$/i.test(pathname);
+    const res = await fetchPage(target);
+    if (!res.ok) broken.push(`${ref} → ${res.status || res.error}`);
+    else if (looksLikeAsset && /text\/html/i.test(res.type)) broken.push(`${ref} → 返回了 HTML 回退页`);
+  }
+  return broken;
+}
+
+function runCmd(cmd, args) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args);
+    child.on("close", (code) => resolve(code ?? 1));
+    child.on("error", () => resolve(1));
+  });
+}
+
+function deployPathFor(task, value) {
+  const prefix = `/preview/${task.id}`;
+  const p = String(value || "/");
+  return p.startsWith(prefix) ? p.slice(prefix.length) || "/" : p;
+}
+
+async function runBrowserSpec(url, spec) {
+  const specPath = path.join(ROOT, "runtime", `deploy-spec-${Date.now()}.json`);
+  const shot = path.join(ROOT, "runtime", `deploy-check-${Date.now()}.png`);
+  fs.writeFileSync(specPath, JSON.stringify(spec));
+  const raw = await new Promise((resolve) => {
+    execFile(NODE_BIN, [BROWSER_BIN, url, shot, "2500", specPath], { timeout: 120000, cwd: path.dirname(BROWSER_BIN), maxBuffer: 2 * 1024 * 1024 }, (_error, stdout) => resolve(String(stdout || "")));
+  });
+  fs.rmSync(specPath, { force: true });
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { ok: false, error: raw.slice(0, 200) || "浏览器检查失败" };
+  }
+}
+
+async function replayVerification(task, kind, baseUrl, serverPort) {
+  const checks = task.checks || {};
+  const failures = [];
+  let ran = 0;
+
+  if (kind === "server") {
+    for (const item of (checks.http || []).slice(0, 8)) {
+      const p = deployPathFor(task, item.path);
+      const method = item.method || "GET";
+      const target = `http://127.0.0.1:${serverPort}${p}`;
+      try {
+        const init = { method, headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(10000) };
+        if (item.body && method !== "GET") init.body = item.body;
+        const res = await fetch(target, init);
+        const text = await res.text();
+        ran += 1;
+        if (!res.ok) failures.push(`${method} ${p} → ${res.status}`);
+        else if (item.expectStatus && res.status !== Number(item.expectStatus)) failures.push(`${method} ${p} 状态应为 ${item.expectStatus}，实际 ${res.status}`);
+        else if (item.expect && !text.includes(item.expect)) failures.push(`${method} ${p} 响应里没有「${item.expect}」`);
+      } catch (error) {
+        failures.push(`${method} ${p} → ${String(error.message || error).slice(0, 80)}`);
+      }
+    }
+  }
+
+  const spec = checks.browser;
+  if (spec?.actions?.length && spec?.expect?.length) {
+    const data = await runBrowserSpec(baseUrl, spec);
+    ran += 1;
+    if (!data.ok) failures.push(`发布后交互失败：${(data.failures || []).join("；") || data.error || "未知原因"}`);
+  }
+
+  return { ran, failures };
+}
+
+async function startServerContainer(task, slug, releaseDir, port) {
+  const container = `deploy-${slug}`;
+  await docker(["rm", "-f", container], { timeout: 30000 });
+  const run = await docker([
+    "run",
+    "-d",
+    "--name",
+    container,
+    "--restart",
+    "unless-stopped",
+    "-v",
+    `${releaseDir}:/workspace`,
+    "-w",
+    "/workspace",
+    "-e",
+    "PORT=5173",
+    "-e",
+    "NODE_ENV=production",
+    "-p",
+    `127.0.0.1:${port}:5173`,
+    "--memory",
+    DEPLOY_MEMORY,
+    "--cpus",
+    DEPLOY_CPUS,
+    IMAGE,
+    "sh",
+    "-lc",
+    "npm run start",
+  ]);
+  if (run.code !== 0) return { ok: false, error: run.err || "部署容器启动失败" };
+
+  const healthy = await waitHealthy(port, 60000);
+  if (!healthy) {
+    const logs = await docker(["logs", "--tail", "30", container], { timeout: 15000 });
+    return { ok: false, error: "部署容器 60 秒内未通过健康检查（检查 start 是否监听 process.env.PORT）", logs: (logs.out + logs.err).slice(-1200) };
+  }
+  return { ok: true, container };
+}
+
 async function deploy(task, send) {
   const code = taskCode(task);
   const versionsDir = path.join(taskRoot(task), "versions");
@@ -523,19 +1052,13 @@ async function deploy(task, send) {
   const existing = fs.readdirSync(versionsDir).filter((f) => /^v\d+\.tar\.gz$/.test(f));
   const version = existing.length + 1;
   const slug = task.id.slice(0, 8);
+  const snapshot = path.join(versionsDir, `v${version}.tar.gz`);
+  const releaseDir = path.join(releasesRoot, `v${version}`);
+  const buildDir = path.join(releasesRoot, `.build-v${version}`);
 
-  send({ type: "log", text: `快照源码 → versions/v${version}.tar.gz` });
+  send({ type: "log", text: `快照源码 → v${version}` });
   const tarCode = await new Promise((resolve) => {
-    const child = spawn("tar", [
-      "-czf",
-      path.join(versionsDir, `v${version}.tar.gz`),
-      "--exclude=node_modules",
-      "--exclude=dist",
-      "--exclude=.git",
-      "-C",
-      code,
-      ".",
-    ]);
+    const child = spawn("tar", ["-czf", snapshot, "--exclude=node_modules", "--exclude=dist", "--exclude=.git", "-C", code, "."]);
     child.on("close", (c) => resolve(c ?? 0));
   });
   if (tarCode !== 0) {
@@ -552,19 +1075,28 @@ async function deploy(task, send) {
     }
   }
   const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
-  const hasVite = Boolean(deps.vite);
+  const ssrFramework = ["next", "nuxt", "@nestjs/core", "hapi", "@hapi/hapi"].some((name) => Boolean(deps[name]));
+  const hasVite = Boolean(deps.vite) && !ssrFramework;
   const hasBuild = Boolean(pkg?.scripts?.build);
   const hasStart = Boolean(pkg?.scripts?.start);
   const serverFrameworks = ["next", "nuxt", "express", "fastify", "koa", "@nestjs/core", "hapi", "@hapi/hapi"];
   const isServer = hasStart || serverFrameworks.some((name) => Boolean(deps[name]));
 
-  const runBuilder = async (command) => {
-    send({ type: "log", text: `builder: ${command}` });
+  fs.rmSync(buildDir, { recursive: true, force: true });
+  fs.mkdirSync(buildDir, { recursive: true });
+  if ((await runCmd("tar", ["-xzf", snapshot, "-C", buildDir])) !== 0) {
+    send({ type: "error", message: "解压快照失败" });
+    return;
+  }
+  await runCmd("chown", ["-R", `${UID}:${UID}`, buildDir]);
+
+  const runBuilder = async (dir, command) => {
+    send({ type: "log", text: `构建: ${command}` });
     const args = [
       "run",
       "--rm",
       "-v",
-      `${code}:/workspace`,
+      `${dir}:/workspace`,
       "-w",
       "/workspace",
       "-u",
@@ -581,53 +1113,42 @@ async function deploy(task, send) {
   published.apps = published.apps || {};
 
   if (isServer) {
+    fs.rmSync(releaseDir, { recursive: true, force: true });
+    fs.renameSync(buildDir, releaseDir);
+
     if (hasBuild) {
-      const exit = await runBuilder("npm run build");
+      const buildCmd = hasVite ? "npx vite build --base=/" : "npm run build";
+      const exit = await runBuilder(releaseDir, buildCmd);
       if (exit !== 0) {
         send({ type: "error", message: `构建失败（exit ${exit}）` });
         return;
       }
     }
 
-    const port = await allocateDeployPort(published);
-    const container = `deploy-${slug}`;
-    await docker(["rm", "-f", container], { timeout: 30000 });
-
-    send({ type: "log", text: `启动部署容器 ${container} · 端口 ${port}` });
-    const run = await docker([
-      "run",
-      "-d",
-      "--name",
-      container,
-      "--restart",
-      "unless-stopped",
-      "-v",
-      `${code}:/workspace`,
-      "-w",
-      "/workspace",
-      "-e",
-      "PORT=5173",
-      "-e",
-      "NODE_ENV=production",
-      "-p",
-      `127.0.0.1:${port}:5173`,
-      IMAGE,
-      "sh",
-      "-lc",
-      "npm run start",
-    ]);
-    if (run.code !== 0) {
-      send({ type: "error", message: run.err || "部署容器启动失败" });
+    const existingApp = published.apps[slug];
+    const port = existingApp?.kind === "server" && existingApp.port ? existingApp.port : await allocateDeployPort(published);
+    send({ type: "log", text: `启动部署环境（端口 ${port}）` });
+    const started = await startServerContainer(task, slug, releaseDir, port);
+    if (!started.ok) {
+      if (started.logs) send({ type: "log", text: started.logs });
+      send({ type: "error", message: started.error });
       return;
     }
 
-    const healthy = await waitHealthy(port, 60000);
-    if (!healthy) {
-      const logs = await docker(["logs", "--tail", "30", container], { timeout: 15000 });
-      send({ type: "log", text: (logs.out + logs.err).slice(-1500) });
-      send({ type: "error", message: "部署容器 60 秒内未通过健康检查（检查 start 脚本是否监听 process.env.PORT）" });
+    const broken = await findBrokenAssets(`http://127.0.0.1:${port}/`);
+    if (broken.length) {
+      await docker(["rm", "-f", `deploy-${slug}`], { timeout: 30000 });
+      send({ type: "error", message: `发布后资源检查失败：${broken.slice(0, 5).join("；")}` });
       return;
     }
+
+    const replay = await replayVerification(task, "server", `http://127.0.0.1:${port}/`, port);
+    if (replay.failures.length) {
+      await docker(["rm", "-f", `deploy-${slug}`], { timeout: 30000 });
+      send({ type: "error", message: `发布后验收失败：${replay.failures.slice(0, 4).join("；")}` });
+      return;
+    }
+    if (replay.ran) send({ type: "log", text: `发布后回放验收 ${replay.ran} 项通过` });
 
     const url = appUrl(slug);
     published.apps[slug] = {
@@ -636,7 +1157,8 @@ async function deploy(task, send) {
       version,
       kind: "server",
       port,
-      container,
+      container: `deploy-${slug}`,
+      dir: releaseDir,
       url,
       at: new Date().toISOString(),
     };
@@ -648,25 +1170,27 @@ async function deploy(task, send) {
       saveTasks(state);
     }
     send({ type: "log", text: `已发布（容器）: ${url}` });
-    send({ type: "done", slug, version, url, kind: "server", port });
+    send({ type: "done", slug, version, url, kind: "server" });
     return;
   }
 
   /* ---------- 静态 / SPA ---------- */
   const doBuild = hasBuild || hasVite;
-  const releaseDir = path.join(releasesRoot, `v${version}`);
-  fs.rmSync(releaseDir, { recursive: true, force: true });
-  fs.mkdirSync(releaseDir, { recursive: true });
-
+  const distBase = buildDir;
   if (doBuild) {
-    send({ type: "log", text: hasVite ? "检测到 Vite 项目，执行 npx vite build" : "检测到构建脚本，启动 builder 容器" });
+    send({ type: "log", text: hasVite ? "构建静态产物（Vite）" : "构建静态产物（build 脚本）" });
     const buildCmd = hasVite ? `npx vite build --base=/apps/${slug}/` : "npm run build";
-    const exit = await runBuilder(buildCmd);
+    const exit = await runBuilder(buildDir, buildCmd);
     if (exit !== 0) {
       send({ type: "error", message: `构建失败（exit ${exit}）` });
       return;
     }
-    const dist = ["dist", "build", "out"].map((d) => path.join(code, d)).find((d) => fs.existsSync(d));
+  }
+
+  fs.rmSync(releaseDir, { recursive: true, force: true });
+  fs.mkdirSync(releaseDir, { recursive: true });
+  if (doBuild) {
+    const dist = ["dist", "build", "out"].map((d) => path.join(distBase, d)).find((d) => fs.existsSync(d));
     if (!dist) {
       send({ type: "error", message: "构建完成但没有找到 dist/build/out" });
       return;
@@ -674,11 +1198,12 @@ async function deploy(task, send) {
     fs.cpSync(dist, releaseDir, { recursive: true });
   } else {
     send({ type: "log", text: "无构建脚本，按静态产物处理" });
-    for (const entry of fs.readdirSync(code, { withFileTypes: true })) {
+    for (const entry of fs.readdirSync(distBase, { withFileTypes: true })) {
       if (["node_modules", "dist", ".git", ".cache"].includes(entry.name)) continue;
-      fs.cpSync(path.join(code, entry.name), path.join(releaseDir, entry.name), { recursive: true });
+      fs.cpSync(path.join(distBase, entry.name), path.join(releaseDir, entry.name), { recursive: true });
     }
   }
+  fs.rmSync(buildDir, { recursive: true, force: true });
 
   const url = `/apps/${slug}/`;
   published.apps[slug] = {
@@ -691,6 +1216,18 @@ async function deploy(task, send) {
     at: new Date().toISOString(),
   };
   writeJson(PUBLISH_FILE, published);
+
+  const baseUrl = `http://127.0.0.1:${PROXY_PORT}${url}`;
+  const broken = await findBrokenAssets(baseUrl);
+  const replay = broken.length ? { ran: 0, failures: [] } : await replayVerification(task, "static", baseUrl, 0);
+  if (broken.length || replay.failures.length) {
+    delete published.apps[slug];
+    writeJson(PUBLISH_FILE, published);
+    const reasons = [...broken, ...replay.failures].slice(0, 4).join("；");
+    send({ type: "error", message: `发布后验收失败：${reasons}` });
+    return;
+  }
+  if (replay.ran) send({ type: "log", text: `发布后回放验收 ${replay.ran} 项通过` });
 
   const state = loadTasks();
   if (state.tasks[task.id]) {
@@ -739,14 +1276,19 @@ function readBody(req) {
 }
 
 function serveUi(req, res, url) {
-  const rel = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, "");
-  const full = path.join(UI_DIR, rel);
-  if (!full.startsWith(UI_DIR) || !fs.existsSync(full) || fs.statSync(full).isDirectory()) {
+  let rel = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, "");
+  try {
+    rel = decodeURIComponent(rel);
+    const full = ensureInside(UI_DIR, rel);
+    if (!fs.existsSync(full) || fs.statSync(full).isDirectory()) {
+      res.writeHead(404).end("not found");
+      return;
+    }
+    res.writeHead(200, { "content-type": MIME[path.extname(full)] || "application/octet-stream" });
+    res.end(fs.readFileSync(full));
+  } catch {
     res.writeHead(404).end("not found");
-    return;
   }
-  res.writeHead(200, { "content-type": MIME[path.extname(full)] || "application/octet-stream" });
-  res.end(fs.readFileSync(full));
 }
 
 const server = http.createServer(async (req, res) => {
@@ -799,7 +1341,7 @@ const server = http.createServer(async (req, res) => {
       /* ignore */
     }
     const container = `atoms-${id}`;
-    const run = await docker(["run", "-d", "--name", container, "-v", `${dir}:/workspace`, "-p", `127.0.0.1:${port}:${CONTAINER_PORT}`, IMAGE]);
+    const run = await docker(["run", "-d", "--name", container, "-v", `${dir}:/workspace`, "-p", `127.0.0.1:${port}:${CONTAINER_PORT}`, "--memory", SANDBOX_MEMORY, "--memory-swap", SANDBOX_MEMORY, "--cpus", SANDBOX_CPUS, "--pids-limit", SANDBOX_PIDS, IMAGE]);
     if (run.code !== 0) return json(res, 500, { error: run.err || "容器启动失败" });
     const task = {
       id,
@@ -839,23 +1381,90 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (parts.length === 3 && req.method === "DELETE") {
-      await docker(["rm", "-f", task.container], { timeout: 30000 });
-      const deployedSlug = task.id.slice(0, 8);
-      await docker(["rm", "-f", `deploy-${deployedSlug}`], { timeout: 30000 });
-      delete state.tasks[id];
-      saveTasks(state);
+      if (!lockTask(id)) return json(res, 409, { error: "任务正在运行，稍后再试" });
+      try {
+        await docker(["rm", "-f", task.container], { timeout: 30000 });
+        const deployedSlug = task.id.slice(0, 8);
+        await docker(["rm", "-f", `deploy-${deployedSlug}`], { timeout: 30000 });
+        delete state.tasks[id];
+        saveTasks(state);
 
-      const published = readJson(PUBLISH_FILE, { apps: {} });
-      let changed = false;
-      for (const [slug, app] of Object.entries(published.apps || {})) {
-        if (app.taskId === id) {
-          delete published.apps[slug];
-          changed = true;
+        const published = readJson(PUBLISH_FILE, { apps: {} });
+        let changed = false;
+        for (const [slug, app] of Object.entries(published.apps || {})) {
+          if (app.taskId === id) {
+            delete published.apps[slug];
+            changed = true;
+          }
         }
+        if (changed) writeJson(PUBLISH_FILE, published);
+      } finally {
+        unlockTask(id);
       }
-      if (changed) writeJson(PUBLISH_FILE, published);
-
       return json(res, 200, { ok: true });
+    }
+
+    if (parts[3] === "versions" && req.method === "GET") {
+      const releasesRoot = path.join(taskRoot(task), "releases");
+      let versions = [];
+      try {
+        versions = fs
+          .readdirSync(releasesRoot)
+          .filter((name) => /^v\d+$/.test(name))
+          .map((name) => {
+            const v = Number(name.slice(1));
+            return { version: v, current: task.published?.version === v, at: fs.statSync(path.join(releasesRoot, name)).mtime.toISOString() };
+          })
+          .sort((a, b) => b.version - a.version);
+      } catch {
+        versions = [];
+      }
+      return json(res, 200, { versions, published: task.published || null });
+    }
+
+    if (parts[3] === "rollback" && req.method === "POST") {
+      const body = await readBody(req);
+      const version = Number(body.version);
+      if (!Number.isInteger(version) || version < 1) return json(res, 400, { error: "版本号不对" });
+      const releasesRoot = path.join(taskRoot(task), "releases");
+      const releaseDir = path.join(releasesRoot, `v${version}`);
+      if (!fs.existsSync(releaseDir)) return json(res, 404, { error: `v${version} 没有可用的发布产物` });
+      if (!lockTask(id)) return json(res, 409, { error: "这个任务正在运行，稍后再试" });
+      try {
+        const published = readJson(PUBLISH_FILE, { apps: {} });
+        const slug = task.id.slice(0, 8);
+        const app = published.apps?.[slug];
+        if (!app) return json(res, 400, { error: "这个任务还没有发布过" });
+        const previous = { dir: app.dir, version: app.version };
+
+        if (app.kind === "server") {
+          const started = await startServerContainer(task, slug, releaseDir, app.port);
+          if (!started.ok) {
+            if (previous.dir) await startServerContainer(task, slug, previous.dir, app.port);
+            return json(res, 500, { error: started.error });
+          }
+          const broken = await findBrokenAssets(`http://127.0.0.1:${app.port}/`);
+          const replay = broken.length ? { failures: broken } : await replayVerification(task, "server", `http://127.0.0.1:${app.port}/`, app.port);
+          if (replay.failures.length) {
+            if (previous.dir) await startServerContainer(task, slug, previous.dir, app.port);
+            return json(res, 500, { error: `v${version} 验收失败：${replay.failures.slice(0, 3).join("；")}` });
+          }
+        }
+
+        app.version = version;
+        app.dir = releaseDir;
+        app.at = new Date().toISOString();
+        writeJson(PUBLISH_FILE, published);
+
+        const state = loadTasks();
+        if (state.tasks[id]) {
+          state.tasks[id].published = { ...(state.tasks[id].published || {}), version, at: app.at };
+          saveTasks(state);
+        }
+        return json(res, 200, { ok: true, version, url: app.url });
+      } finally {
+        unlockTask(id);
+      }
     }
 
     if (parts[3] === "files" && req.method === "GET") {
@@ -884,10 +1493,12 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const message = String(body.message || "").trim();
       if (!message) return json(res, 400, { error: "消息为空" });
+      if (!lockTask(id)) return json(res, 409, { error: "这个任务正在运行，等它结束再发" });
 
       const fresh = loadTasks();
       fresh.tasks[id].messages.push({ role: "user", content: message, at: new Date().toISOString() });
       fresh.tasks[id].lastActiveAt = new Date().toISOString();
+      fresh.tasks[id].run = "running";
       saveTasks(fresh);
 
       res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", connection: "keep-alive" });
@@ -897,24 +1508,51 @@ const server = http.createServer(async (req, res) => {
         const latest = loadTasks();
         latest.tasks[id].messages.push({ role: "assistant", content: result.summary, at: new Date().toISOString() });
         latest.tasks[id].events = [...(latest.tasks[id].events || []), ...result.events].slice(-80);
+        if (result.checks) latest.tasks[id].checks = result.checks;
+        latest.tasks[id].run = null;
+        latest.tasks[id].verify = {
+          ok: Boolean(result.verified),
+          reason: result.verified ? "" : String(result.summary || "").slice(0, 300),
+          at: new Date().toISOString(),
+        };
         saveTasks(latest);
       } catch (error) {
         send({ type: "error", message: String(error.message || error) });
+        const latest = loadTasks();
+        if (latest.tasks[id]) {
+          latest.tasks[id].run = null;
+          latest.tasks[id].verify = { ok: false, reason: String(error.message || error).slice(0, 300), at: new Date().toISOString() };
+          saveTasks(latest);
+        }
       } finally {
         res.end();
+        unlockTask(id);
       }
       return;
     }
 
     if (parts[3] === "deploy" && req.method === "POST") {
+      if (!lockTask(id)) return json(res, 409, { error: "这个任务正在运行，等它结束再部署" });
       res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", connection: "keep-alive" });
-      const send = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+      let outcome = { ok: false, message: "部署没有返回结果" };
+      const send = (event) => {
+        if (event.type === "done") outcome = { ok: true, version: event.version, url: event.url, kind: event.kind };
+        if (event.type === "error") outcome = { ok: false, message: event.message };
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      };
       try {
         await deploy(task, send);
       } catch (error) {
-        send({ type: "error", message: String(error.message || error) });
+        outcome = { ok: false, message: String(error.message || error) };
+        send({ type: "error", message: outcome.message });
       } finally {
+        const latest = loadTasks();
+        if (latest.tasks[id]) {
+          latest.tasks[id].deploy = { ...outcome, at: new Date().toISOString() };
+          saveTasks(latest);
+        }
         res.end();
+        unlockTask(id);
       }
       return;
     }
@@ -955,6 +1593,19 @@ setInterval(async () => {
     }
   }
   if (changed) writeJson(PUBLISH_FILE, published);
+})();
+
+(function recoverInterrupted() {
+  const state = loadTasks();
+  let changed = false;
+  for (const task of Object.values(state.tasks)) {
+    if (task.run === "running") {
+      task.run = null;
+      task.verify = { ok: false, reason: "服务重启，任务中断", at: new Date().toISOString() };
+      changed = true;
+    }
+  }
+  if (changed) saveTasks(state);
 })();
 
 server.listen(PORT, "0.0.0.0", () => {
