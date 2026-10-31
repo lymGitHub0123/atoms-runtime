@@ -140,6 +140,65 @@ function saveTasks(state) {
 const taskRoot = (task) => path.join(ROOT, "data", task.uid || "admin", task.id);
 const taskCode = (task) => path.join(taskRoot(task), "code");
 
+async function ensureTaskContainer(task) {
+  const inspect = await docker(["inspect", "-f", "{{.State.Running}}", task.container], { timeout: 10000 });
+  if (inspect.code === 0 && inspect.out.trim() === "true") return { ok: true, port: task.port };
+
+  await docker(["rm", "-f", task.container], { timeout: 30000 });
+  const dir = taskCode(task);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.chownSync(path.join(ROOT, "data", task.uid || "admin", task.id), Number(UID), Number(UID));
+    fs.chownSync(dir, Number(UID), Number(UID));
+  } catch {
+    /* ignore */
+  }
+
+  const start = (port) =>
+    docker([
+      "run",
+      "-d",
+      "--name",
+      task.container,
+      "-v",
+      `${dir}:/workspace`,
+      "-p",
+      `127.0.0.1:${port}:${CONTAINER_PORT}`,
+      "--memory",
+      SANDBOX_MEMORY,
+      "--memory-swap",
+      SANDBOX_MEMORY,
+      "--cpus",
+      SANDBOX_CPUS,
+      "--pids-limit",
+      SANDBOX_PIDS,
+      IMAGE,
+    ]);
+
+  let port = task.port;
+  let run = await start(port);
+  if (run.code !== 0) {
+    const state = loadTasks();
+    try {
+      port = await allocatePort(state);
+    } catch (error) {
+      return { ok: false, error: String(error.message || error) };
+    }
+    run = await start(port);
+  }
+  if (run.code !== 0) return { ok: false, error: (run.err || run.out || "容器启动失败").slice(0, 300) };
+
+  const state = loadTasks();
+  if (state.tasks[task.id]) {
+    state.tasks[task.id].port = port;
+    state.tasks[task.id].status = "running";
+    saveTasks(state);
+  }
+  task.port = port;
+  task.status = "running";
+  return { ok: true, port, recreated: true };
+}
+
 function ensureInside(root, target) {
   const base = fs.realpathSync(root);
   const full = path.resolve(base, target || ".");
@@ -677,8 +736,8 @@ async function runTool(task, name, args, gate) {
         const res = await fetch(target, init);
         const text = await res.text();
         const expectMatched = args.expect ? text.includes(args.expect) : true;
-        const statusMatched = args.expectStatus ? res.status === Number(args.expectStatus) : true;
-        const ok = res.ok && expectMatched && statusMatched;
+        const statusOk = args.expectStatus ? res.status === Number(args.expectStatus) : res.ok;
+        const ok = statusOk && expectMatched;
         if (gate) {
           gate.httpOk = ok;
           if (ok && args.checkId && gate.checks.has(String(args.checkId))) gate.verified.add(String(args.checkId));
@@ -699,7 +758,7 @@ async function runTool(task, name, args, gate) {
           status: res.status,
           ms: Date.now() - started,
           expectMatched,
-          statusMatched,
+          statusMatched: statusOk,
           snippet: text.slice(0, 600),
         };
       } catch (error) {
@@ -1003,8 +1062,7 @@ async function replayVerification(task, kind, baseUrl, serverPort) {
   return { ran, failures };
 }
 
-async function startServerContainer(task, slug, releaseDir, port) {
-  const container = `deploy-${slug}`;
+async function startServerContainer(releaseDir, port, container) {
   await docker(["rm", "-f", container], { timeout: 30000 });
   const run = await docker([
     "run",
@@ -1125,26 +1183,28 @@ async function deploy(task, send) {
       }
     }
 
-    const existingApp = published.apps[slug];
-    const port = existingApp?.kind === "server" && existingApp.port ? existingApp.port : await allocateDeployPort(published);
+    const previous = published.apps[slug];
+    const port = await allocateDeployPort(published);
+    const nextName = `deploy-${slug}-next`;
     send({ type: "log", text: `启动部署环境（端口 ${port}）` });
-    const started = await startServerContainer(task, slug, releaseDir, port);
+    const started = await startServerContainer(releaseDir, port, nextName);
     if (!started.ok) {
       if (started.logs) send({ type: "log", text: started.logs });
+      await docker(["rm", "-f", nextName], { timeout: 30000 });
       send({ type: "error", message: started.error });
       return;
     }
 
     const broken = await findBrokenAssets(`http://127.0.0.1:${port}/`);
     if (broken.length) {
-      await docker(["rm", "-f", `deploy-${slug}`], { timeout: 30000 });
+      await docker(["rm", "-f", nextName], { timeout: 30000 });
       send({ type: "error", message: `发布后资源检查失败：${broken.slice(0, 5).join("；")}` });
       return;
     }
 
     const replay = await replayVerification(task, "server", `http://127.0.0.1:${port}/`, port);
     if (replay.failures.length) {
-      await docker(["rm", "-f", `deploy-${slug}`], { timeout: 30000 });
+      await docker(["rm", "-f", nextName], { timeout: 30000 });
       send({ type: "error", message: `发布后验收失败：${replay.failures.slice(0, 4).join("；")}` });
       return;
     }
@@ -1157,12 +1217,21 @@ async function deploy(task, send) {
       version,
       kind: "server",
       port,
-      container: `deploy-${slug}`,
+      container: nextName,
       dir: releaseDir,
       url,
       at: new Date().toISOString(),
     };
     writeJson(PUBLISH_FILE, published);
+
+    const finalName = `deploy-${slug}`;
+    const oldName = previous?.container || finalName;
+    if (oldName !== nextName) await docker(["rm", "-f", oldName], { timeout: 30000 });
+    const renamed = await docker(["rename", nextName, finalName], { timeout: 15000 });
+    if (renamed.code === 0) {
+      published.apps[slug].container = finalName;
+      writeJson(PUBLISH_FILE, published);
+    }
 
     const state = loadTasks();
     if (state.tasks[task.id]) {
@@ -1435,20 +1504,43 @@ const server = http.createServer(async (req, res) => {
         const slug = task.id.slice(0, 8);
         const app = published.apps?.[slug];
         if (!app) return json(res, 400, { error: "这个任务还没有发布过" });
-        const previous = { dir: app.dir, version: app.version };
+        const previousContainer = app.container;
 
         if (app.kind === "server") {
-          const started = await startServerContainer(task, slug, releaseDir, app.port);
+          const port = await allocateDeployPort(published);
+          const nextName = `deploy-${slug}-next`;
+          const started = await startServerContainer(releaseDir, port, nextName);
           if (!started.ok) {
-            if (previous.dir) await startServerContainer(task, slug, previous.dir, app.port);
+            await docker(["rm", "-f", nextName], { timeout: 30000 });
             return json(res, 500, { error: started.error });
           }
-          const broken = await findBrokenAssets(`http://127.0.0.1:${app.port}/`);
-          const replay = broken.length ? { failures: broken } : await replayVerification(task, "server", `http://127.0.0.1:${app.port}/`, app.port);
+          const broken = await findBrokenAssets(`http://127.0.0.1:${port}/`);
+          const replay = broken.length ? { failures: broken } : await replayVerification(task, "server", `http://127.0.0.1:${port}/`, port);
           if (replay.failures.length) {
-            if (previous.dir) await startServerContainer(task, slug, previous.dir, app.port);
+            await docker(["rm", "-f", nextName], { timeout: 30000 });
             return json(res, 500, { error: `v${version} 验收失败：${replay.failures.slice(0, 3).join("；")}` });
           }
+          app.port = port;
+          app.container = nextName;
+          app.dir = releaseDir;
+          app.version = version;
+          app.at = new Date().toISOString();
+          writeJson(PUBLISH_FILE, published);
+
+          const finalName = `deploy-${slug}`;
+          if (previousContainer && previousContainer !== nextName) await docker(["rm", "-f", previousContainer], { timeout: 30000 });
+          const renamed = await docker(["rename", nextName, finalName], { timeout: 15000 });
+          if (renamed.code === 0) {
+            app.container = finalName;
+            writeJson(PUBLISH_FILE, published);
+          }
+
+          const state = loadTasks();
+          if (state.tasks[id]) {
+            state.tasks[id].published = { ...(state.tasks[id].published || {}), version, port, at: app.at };
+            saveTasks(state);
+          }
+          return json(res, 200, { ok: true, version, url: app.url });
         }
 
         app.version = version;
@@ -1494,6 +1586,12 @@ const server = http.createServer(async (req, res) => {
       const message = String(body.message || "").trim();
       if (!message) return json(res, 400, { error: "消息为空" });
       if (!lockTask(id)) return json(res, 409, { error: "这个任务正在运行，等它结束再发" });
+
+      const ensured = await ensureTaskContainer(task);
+      if (!ensured.ok) {
+        unlockTask(id);
+        return json(res, 500, { error: `运行容器起不来：${ensured.error}` });
+      }
 
       const fresh = loadTasks();
       fresh.tasks[id].messages.push({ role: "user", content: message, at: new Date().toISOString() });

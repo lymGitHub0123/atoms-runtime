@@ -24,8 +24,8 @@ Atoms Runtime 把这件事做完整：
 | 入口 | 地址 |
 | --- | --- |
 | 工作台（需登录） | http://<your-host>:13579 |
-| 静态 SPA 示例（React 2048） | http://<your-host>:24680/apps/af208933/ |
-| 容器应用示例（Express 留言板） | http://83341a65.<your-host>.sslip.io:24680/ |
+| 静态 SPA 示例 | http://<your-host>:24680/apps/bb993bee/ |
+| 容器应用示例 | http://83341a65.<your-host>.sslip.io:24680/ |
 
 演示路径见文末「3 分钟演示」。
 
@@ -160,13 +160,13 @@ node ops/proxy.mjs                # 反代 :24680
 ## 3 分钟演示
 
 1. 打开工作台 → 用提交文档里提供的账号登录
-2. 新建任务，输入「用 Express 做一个留言板：server.js 提供 GET/POST /api/messages，数据存 data.json；public/index.html 展示列表并可提交；start 脚本 node server.js，监听 process.env.PORT || 3000」
+2. 新建任务，输入一个需要服务端存储的需求：GET/POST 接口、数据落盘、页面展示并可提交，start 脚本监听 process.env.PORT
 3. 看左侧 Agent Flow：写文件 → `npm install express` → 起服务 → `check_http` → `browser_check`（控制台 0 报错）
 4. 点「部署」→ 日志出现「启动部署容器 deploy-xxxx · 端口 22xxx」→ 弹出地址，复制
 5. 打开容器应用地址，发一条留言；换浏览器/无痕再打开，数据还在（服务端 data.json）
 6. 回到工作台，点「文件」看源码、点任务卡片 `×` 删除 → 容器与发布链接一起回收
 
-再演示静态模式：新建「用 react 写一个 2048」→ 预览即热更 → 部署得到 `/apps/{slug}/`（不启容器）。
+再演示静态模式：新建一个纯前端交互页面 → 预览即热更 → 部署得到 `/apps/{slug}/`（不启容器）。
 
 ## 取舍（面试答辩）
 

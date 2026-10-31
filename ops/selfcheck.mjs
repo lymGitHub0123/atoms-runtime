@@ -5,6 +5,7 @@
 const BASE = (process.argv[2] || "http://127.0.0.1:13579").replace(/\/+$/, "");
 const USER = process.argv[3] || process.env.ADMIN_USER || "admin";
 const PASS = process.argv[4] || process.env.ADMIN_PASSWORD || "";
+const keep = process.argv.includes("--keep");
 
 let cookie = "";
 const results = [];
@@ -181,7 +182,9 @@ http.createServer((req, res) => {
     page2.includes("V2") ? ok("服务端发布 v2", `v${second.version}`) : fail("服务端发布 v2");
 
     const back = await call(`/api/tasks/${id}/rollback`, { method: "POST", body: JSON.stringify({ version: first.version }) });
-    const page3 = await (await fetch(`http://127.0.0.1:${port2}/`)).text();
+    const afterRollback = await call(`/api/tasks/${id}`);
+    const port3 = afterRollback.data?.published?.port || port2;
+    const page3 = await (await fetch(`http://127.0.0.1:${port3}/`)).text();
     back.status === 200 && page3.includes("V1") ? ok("服务端回滚", `v${back.data.version}`) : fail("服务端回滚", back.data?.error || `HTTP ${back.status}`);
   } catch (error) {
     fail("服务端用例", String(error.message || error));
@@ -194,6 +197,10 @@ main()
   .catch((error) => fail("执行中断", String(error.message || error)))
   .finally(async () => {
     for (const id of taskIds) {
+      if (keep) {
+        console.log(`KEEP  自检任务 ${id}`);
+        continue;
+      }
       const removed = await call(`/api/tasks/${id}`, { method: "DELETE" }).catch(() => ({ status: 0 }));
       if (removed.status === 200) ok("清理自检任务", id);
       else fail("清理自检任务", `${id} HTTP ${removed.status}`);

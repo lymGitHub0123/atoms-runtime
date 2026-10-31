@@ -49,6 +49,7 @@ plan_checks（把需求拆成验收项）
 ```
 
 - `finish` 有门禁：没有验收清单、改完代码没重新验收、有按钮却没做交互、断言没过，都会被拒绝并返回原因
+- `check_http` 指定了 `expectStatus` 就按状态码判断（比如期望 400），不强制 2xx；没指定时仍要求 2xx
 - 迭代是**秒级热更**，不做构建；构建只发生在部署时
 - 沙箱没有 curl/git/ps/pkill，预览启停统一用 `dev_server`
 - Vite 预览必须带 `--base=/preview/{taskId}/`；但业务代码里的接口路径要跟着应用根走（`import.meta.env.BASE_URL` 或相对路径），不能写死预览前缀，否则发布后 404
@@ -67,7 +68,7 @@ POST /api/tasks/:id/deploy  (SSE 日志)
 6. 反代 /apps/{slug}/ 读取指针 → 静态文件（SPA fallback）
 ```
 
-回滚：`POST /api/tasks/:id/rollback {version}`，界面选历史版本。回滚会先起旧版本、跑一遍自检，失败自动退回原版本；快照和产物都保留。
+回滚：`POST /api/tasks/:id/rollback {version}`，界面选历史版本。回滚同样先起新容器、跑一遍检查，通过后才切流量；失败旧版本继续服务。
 
 ### 4.1 容器化部署（SSR / 后端）
 
@@ -75,16 +76,16 @@ POST /api/tasks/:id/deploy  (SSE 日志)
 
 ```
 快照 → 解压到 releases/vN → （Vite 项目按根路径构建：npx vite build --base=/）
-→ 从 22000–23000 分配端口（同一个 slug 复用原端口）
-→ docker run deploy-{slug}，挂载 releases/vN（不再挂工作区），注入 PORT=5173
-→ 健康检查（60s 内 / 返回 <500）
-→ 静态资源自检 + 重放验收
+→ 分配一个新端口，先起 deploy-{slug}-next，挂载 releases/vN（不挂工作区），注入 PORT=5173
+→ 健康检查（60s 内 / 返回 <500）+ 静态资源自检 + 重放验收
+→ 通过后切换 published 指针 → 删旧容器 → 改名 deploy-{slug}
 → 反代 {slug}.<your-host>.sslip.io:24680 → 127.0.0.1:{port}
 ```
 
+- 失败时只删掉 `-next` 容器，**旧版本继续服务**，不会出现“发布失败把线上打挂”
 - 容器应用用**子域名根路径**访问，避免路径前缀破坏 `/_next`、`/api` 这类绝对资源
 - `/apps/{slug}/` 对容器应用会 302 跳转到子域名
-- 重新部署会重建同名容器；删除任务会一并删除 `deploy-{slug}` 并下线发布
+- 删除任务会一并删除 `deploy-{slug}` 并下线发布
 - 应用必须监听 `process.env.PORT`（Express 示例默认 3000，容器里注入 5173）
 
 ## 5. 账号与运维
@@ -129,7 +130,7 @@ node ops/selfcheck.mjs http://127.0.0.1:13579 admin <password>
 node ops/cleanroom.mjs .
 ```
 
-`ops/regress.mjs` 是模型回归评测：10 条固定需求（2048、贪吃蛇、待办、留言板、仪表盘等）逐条生成，记录是否通过验收、耗时和检查项数量；`--deploy` 会连发布和回放一起跑：
+`ops/regress.mjs` 是模型回归评测：10 条固定需求（交互页面、表单、服务端接口等）逐条生成，记录是否通过验收、耗时和检查项数量；`--deploy` 会连发布和回放一起跑：
 
 ```bash
 node ops/regress.mjs http://127.0.0.1:13579 admin <password> --deploy
