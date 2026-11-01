@@ -39,7 +39,40 @@ const readJson = (file, fallback) => {
 const publishedApp = (slug) => readJson(PUBLISH_FILE, { apps: {} }).apps?.[slug] || null;
 const previewPort = (taskId) => readJson(MAP_FILE, {})[taskId] || null;
 
-function proxyToPort(req, res, port) {
+const CONTROL = new URL(process.env.CONTROL_URL || "http://127.0.0.1:13579");
+
+function ensurePreview(taskId) {
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        host: CONTROL.hostname,
+        port: CONTROL.port || 80,
+        path: `/api/internal/preview/${taskId}`,
+        method: "POST",
+        timeout: 30000,
+      },
+      (upstream) => {
+        let body = "";
+        upstream.on("data", (chunk) => (body += chunk));
+        upstream.on("end", () => {
+          try {
+            resolve(JSON.parse(body).port || null);
+          } catch {
+            resolve(null);
+          }
+        });
+      },
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.end();
+  });
+}
+
+function proxyToPort(req, res, port, onError) {
   const upstream = http.request(
     {
       host: "127.0.0.1",
@@ -53,7 +86,8 @@ function proxyToPort(req, res, port) {
       up.pipe(res);
     },
   );
-  upstream.on("error", () => {
+  upstream.on("error", async () => {
+    if (onError && (await onError())) return;
     if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
     res.end("bad gateway");
   });
@@ -98,7 +132,7 @@ function slugFromHost(host) {
   return name.slice(0, -(APP_HOST_SUFFIX.length + 1)) || null;
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://x");
 
   // 1) 子域名路由：{slug}.<suffix> → 容器应用（根路径）
@@ -117,13 +151,20 @@ const server = http.createServer((req, res) => {
   // 2) 预览：/preview/{taskId}/ → 沙箱 dev server（保留完整路径，Vite base 依赖它）
   const preview = url.pathname.match(/^\/preview\/([^/]+)(\/.*)?$/);
   if (preview) {
-    const port = previewPort(preview[1]);
+    let port = previewPort(preview[1]);
+    if (!port) port = await ensurePreview(preview[1]);
     if (!port) {
-      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-      res.end(`no runtime for ${preview[1]}`);
+      res.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
+      res.end(`preview unavailable for ${preview[1]}（容器启动失败，请打开任务查看原因）`);
       return;
     }
-    return proxyToPort(req, res, port);
+    return proxyToPort(req, res, port, async () => {
+      if (req.method !== "GET") return false;
+      const retryPort = await ensurePreview(preview[1]);
+      if (!retryPort) return false;
+      proxyToPort(req, res, retryPort);
+      return true;
+    });
   }
 
   // 3) 路径访问：/apps/{slug}/{path}

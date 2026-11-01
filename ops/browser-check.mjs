@@ -106,6 +106,56 @@ try {
     if (!action.ok) failures.push(`动作失败（${action.type}）：${action.error || "未知错误"}`);
   }
 
+  const layoutIssues = await page
+    .evaluate(() => {
+      const issues = [];
+      const grids = [...document.querySelectorAll("*")].filter((el) => {
+        const style = getComputedStyle(el);
+        return style.display.includes("grid") && parseFloat(style.gap || style.rowGap || "0") > 0;
+      });
+      for (const grid of grids) {
+        const cells = [...grid.children].filter((el) => {
+          const style = getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.position === "static" && rect.width >= 20 && rect.height >= 20;
+        });
+        if (cells.length < 4) continue;
+        const first = cells[0].getBoundingClientRect();
+        const cellW = first.width;
+        const cellH = first.height;
+        const abs = [...grid.querySelectorAll("*")].filter((el) => {
+          const style = getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return (
+            style.position === "absolute" &&
+            Math.abs(rect.width - cellW) <= cellW * 0.25 &&
+            Math.abs(rect.height - cellH) <= cellH * 0.25
+          );
+        });
+        for (const tile of abs) {
+          const rect = tile.getBoundingClientRect();
+          const cx = rect.x + rect.width / 2;
+          const cy = rect.y + rect.height / 2;
+          let best = Infinity;
+          for (const cell of cells) {
+            const cellRect = cell.getBoundingClientRect();
+            const dx = cx - (cellRect.x + cellRect.width / 2);
+            const dy = cy - (cellRect.y + cellRect.height / 2);
+            best = Math.min(best, Math.hypot(dx, dy));
+          }
+          if (best > 2 && best <= Math.max(cellW, cellH) * 0.6) {
+            const name = String(tile.className?.baseVal || tile.className || tile.tagName).slice(0, 40);
+            issues.push({ name, offset: Math.round(best * 10) / 10 });
+          }
+        }
+      }
+      return issues.slice(0, 3);
+    })
+    .catch(() => []);
+  for (const issue of layoutIssues) {
+    failures.push(`网格对齐偏差：${issue.name} 偏离格子 ${issue.offset}px（检查 gap 是否算进位移）`);
+  }
+
   const queryCount = async (selector) =>
     page.evaluate((sel) => document.querySelectorAll(sel).length, selector).catch(() => -1);
   const queryValue = async (selector) =>

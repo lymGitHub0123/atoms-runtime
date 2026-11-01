@@ -199,6 +199,59 @@ async function ensureTaskContainer(task) {
   return { ok: true, port, recreated: true };
 }
 
+function inferPreviewCmd(task) {
+  const code = taskCode(task);
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(code, "package.json"), "utf8"));
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    if (deps.vite) return `npx vite --host 0.0.0.0 --port 5173 --base=/preview/${task.id}/`;
+    if (pkg.scripts?.start) return "npm run start";
+    if (pkg.scripts?.dev) return "npm run dev";
+  } catch {
+    /* no package.json */
+  }
+  return `node /opt/static-server.mjs /workspace 5173 /preview/${task.id}/`;
+}
+
+async function previewAlive(task, attempts = 20) {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await fetch(`http://127.0.0.1:${task.port}/preview/${task.id}/`, { signal: AbortSignal.timeout(1500) });
+      return true;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  return false;
+}
+
+async function startPreviewProcess(task, cmd) {
+  const res = await docker(
+    [
+      "exec",
+      "-d",
+      "-u",
+      "agent",
+      "-w",
+      "/workspace",
+      "-e",
+      "PORT=5173",
+      "-e",
+      `BASE_PATH=/preview/${task.id}`,
+      "-e",
+      `PREVIEW_BASE=/preview/${task.id}`,
+      task.container,
+      "sh",
+      "-lc",
+      `echo $$ > /tmp/atoms-preview.pid; exec ${cmd}`,
+    ],
+    { timeout: 20000 },
+  );
+  if (res.code !== 0) return { ok: false, error: res.err || res.out || "预览启动失败" };
+  const alive = await previewAlive(task);
+  return alive ? { ok: true } : { ok: false, error: "预览进程启动后无法访问" };
+}
+
 function ensureInside(root, target) {
   const base = fs.realpathSync(root);
   const full = path.resolve(base, target || ".");
@@ -523,6 +576,7 @@ const SYSTEM_PROMPT = `你是 Atoms Runtime 里的工程 Agent，在隔离 Linux
 · 同一条命令或同一个检查不要连续重跑；连续两次没有新信息就换方法：读代码、改映射、重新 plan_checks。方向类逻辑用四组固定棋盘做单元测试，失败就直接改映射。
 · 前端请求同源接口时，路径跟着应用根走：Vite 用 import.meta.env.BASE_URL + 'api/xxx'，纯 HTML 用相对路径 './api/xxx'。绝对不要写死 /preview/{taskId}/，部署时应用挂在根路径，写死会导致发布后全部请求 404。
 · 纯 HTML 用相对路径引用资源（./style.css），不要用 /style.css。
+· 网格布局有 gap 时，绝对定位的方块位移要把 gap 算进去（translate(calc(c*100% + c*gap), ...)），或直接用 CSS Grid 放置；browser_check 会量格子中心，偏差超过 2px 判失败。
 · Vite 项目 package.json 必须同时有 dev 和 build 脚本。
 · 服务端应用必须监听 process.env.PORT（预览时是 5173），静态目录用绝对路径（path.join(__dirname, ...)）。
 · 预览端口 5173 只能有一个进程；启动/重启一律用 dev_server（它会清理旧进程），不要用 run background 起服务。
@@ -653,6 +707,11 @@ async function runTool(task, name, args, gate) {
       }
       if (!alive) {
         return { ok: false, error: "预览进程启动后无法访问：命令可能执行完就退出，或者没有监听 5173。请用常驻命令（例如 PORT=5173 node server.js）。" };
+      }
+      const st = loadTasks();
+      if (st.tasks[task.id]) {
+        st.tasks[task.id].previewCmd = cmd;
+        saveTasks(st);
       }
       return { ok: true, output: "预览已启动并可访问（已清理旧进程）" };
     }
@@ -1099,8 +1158,8 @@ async function replayVerification(task, kind, baseUrl, serverPort) {
         const res = await fetch(target, init);
         const text = await res.text();
         ran += 1;
-        if (!res.ok) failures.push(`${method} ${p} → ${res.status}`);
-        else if (item.expectStatus && res.status !== Number(item.expectStatus)) failures.push(`${method} ${p} 状态应为 ${item.expectStatus}，实际 ${res.status}`);
+        const statusOk = item.expectStatus ? res.status === Number(item.expectStatus) : res.ok;
+        if (!statusOk) failures.push(`${method} ${p} → ${res.status}`);
         else if (item.expect && !text.includes(item.expect)) failures.push(`${method} ${p} 响应里没有「${item.expect}」`);
       } catch (error) {
         failures.push(`${method} ${p} → ${String(error.message || error).slice(0, 80)}`);
@@ -1422,6 +1481,25 @@ const server = http.createServer(async (req, res) => {
   const user = currentUser(req);
 
   if (url.pathname === "/api/health") return json(res, 200, { ok: true, model: LLM.model, auth: AUTH_ENABLED, tasks: Object.keys(loadTasks().tasks).length, user, proxyBase: process.env.PUBLIC_PROXY_BASE || "" });
+
+  if (url.pathname.startsWith("/api/internal/preview/") && req.method === "POST") {
+    const ip = req.socket.remoteAddress || "";
+    if (!/(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)/.test(ip)) return json(res, 403, { error: "forbidden" });
+    const id = url.pathname.split("/").filter(Boolean).pop();
+    const state = loadTasks();
+    const task = state.tasks[id];
+    if (!task) return json(res, 404, { error: "任务不存在" });
+    const ensured = await ensureTaskContainer(task);
+    if (!ensured.ok) return json(res, 500, { error: ensured.error });
+    const alive = await previewAlive(task, 2);
+    if (!alive) {
+      const cmd = task.previewCmd || inferPreviewCmd(task);
+      const started = await startPreviewProcess(task, cmd);
+      if (!started.ok) return json(res, 500, { error: started.error });
+    }
+    saveTasks(loadTasks());
+    return json(res, 200, { ok: true, port: task.port });
+  }
 
   if (url.pathname === "/api/login" && req.method === "POST") {
     const body = await readBody(req);
